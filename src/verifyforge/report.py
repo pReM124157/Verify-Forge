@@ -25,10 +25,12 @@ class Report:
     rounds: list[Round] = field(default_factory=list)
     request: str = ""
     error: str = ""
+    repairs: int = 0
+    triage: list[dict] = field(default_factory=list)
 
     @property
-    def repairs(self) -> int:
-        return max(len(self.rounds) - 1, 0)
+    def quarantined(self) -> int:
+        return sum(t["status"] == "QUARANTINED" for t in self.triage)
 
     @property
     def status(self) -> str:
@@ -38,17 +40,25 @@ class Report:
         return "VERIFIED" if r and r.tier1_passed and r.adversarial_passed else "UNVERIFIED"
 
     def write(self, out: Path) -> None:
-        data = asdict(self) | {"status": self.status, "repairs": self.repairs}
+        data = asdict(self) | {"status": self.status, "quarantined": self.quarantined}
         (out / "verification_report.json").write_text(json.dumps(data, indent=2))
 
         def cell(v):
             return "not run" if v is None else ("pass" if v else "FAIL")
 
-        lines = [f"# Verification report: {self.title}", "", f"**Status: {self.status}**", f"Repairs: {self.repairs}", "",
+        lines = [f"# Verification report: {self.title}", "", f"**Status: {self.status}**", f"Repairs: {self.repairs}", f"Quarantined adversarial tests: {self.quarantined}", "",
                  "## Requirements", *[f"- {r['id']}: {r['text']}" for r in self.requirements], "",
                  "## Rounds", "| Round | Tier-1 | Adversarial | Tests | Seconds |", "|---|---|---|---|---|"]
         lines += [f"| {r.n} | {cell(r.tier1_passed)} | {cell(r.adversarial_passed)} | {r.tests_run} | {r.duration:.2f} |"
                   for r in self.rounds]
+        if self.triage:
+            lines += ["", "## Adversarial test triage"]
+            for t in self.triage:
+                lines += ["", f"### {t['test']}", f"Status: **{t['status']}**  (verdict: {t['verdict']})",
+                          f"Reason: {t['reason']}", f"Spec reference: {t['spec_reference'] or 'n/a'}",
+                          "Observed failure:", "```", t["failure"], "```"]
+                if t["status"] == "QUARANTINED":
+                    lines.append(f"Replacement test generated: {'YES' if t['replacement'] else 'NO'}")
         if self.error:
             lines += ["", "## Error", self.error]
         for r in self.rounds:

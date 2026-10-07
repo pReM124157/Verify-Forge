@@ -5,13 +5,16 @@ import json
 from pathlib import Path
 from typing import Callable
 
-from .adversary import adversarial_tests
+from .adversary import adversarial_tests, replacement_test
 from .generate import generate_impl
 from .llm import LLM
 from .repair import repair_impl
 from .report import Report, Round
 from .sandbox import run_pytest
 from .spec import architect, architect_tests, parse_spec
+from .triage import extract_test_source, triage_test
+
+MAX_QUARANTINES = 3
 
 EventHook = Callable[[str, dict], None]
 
@@ -38,6 +41,10 @@ def run(llm: LLM, spec_text: str, out: Path, max_repairs: int = 3, timeout: int 
     versions: list[str] = []
     patches: list[str] = []
     adv = ""
+    quarantined: list[str] = []  # pytest node ids excluded from the adversarial run, each with a recorded reason
+    triaged: set[str] = set()
+    prev_failed: set[str] = set()
+    pending_diff = ""
     try:
         emit("SPEC_GENERATED", text=spec_text, module=spec.module, requirements=len(spec.requirements))
         if tier1 is None:
@@ -64,7 +71,7 @@ def run(llm: LLM, spec_text: str, out: Path, max_repairs: int = 3, timeout: int 
                     adv = adversarial_tests(llm, spec)
                     emit("ADVERSARIAL_GENERATED", text=adv)
                 emit("ADVERSARIAL_RUNNING", round=n)
-                a = run_pytest({**files, "test_adversarial.py": adv}, timeout)
+                a = run_pytest({**files, "test_adversarial.py": adv}, timeout, deselect=quarantined)
                 emit("ADVERSARIAL_RESULT", round=n, passed=a.passed, tests=a.tests_run, exit_code=a.exit_code,
                      seconds=a.duration, text=a.output)
 
@@ -74,10 +81,41 @@ def run(llm: LLM, spec_text: str, out: Path, max_repairs: int = 3, timeout: int 
             outputs = [t.output] + ([a.output] if a else [])
             report.rounds.append(Round(
                 n, t.passed, None if a is None else a.passed, "\n".join(outputs).strip(),
-                patches[-1] if patches else "", regression,
+                pending_diff, regression,
                 t.tests_run + (a.tests_run if a else 0), t.duration + (a.duration if a else 0.0)))
+            pending_diff = ""
             if regression:
                 emit("REGRESSION_DETECTED", round=n)
+
+            # Triage: a test that still fails after a repair gets audited by a fresh agent that never sees the code.
+            if a is not None and not a.passed:
+                changed = False
+                for node in [f for f in a.failed_tests if f in prev_failed and f not in triaged]:
+                    if len(quarantined) >= MAX_QUARANTINES:
+                        break
+                    triaged.add(node)
+                    emit("TRIAGE_STARTED", test=node)
+                    entry = triage_test(llm, spec, adv, node, a.stdout)
+                    status = {"VALID": "KEPT (valid)", "AMBIGUOUS": "KEPT (ambiguous)"}.get(entry["verdict"], "QUARANTINED")
+                    replacement = None
+                    if status == "QUARANTINED":
+                        quarantined.append(node)
+                        changed = True
+                        try:
+                            bad, _ = extract_test_source(adv, node)
+                            replacement = replacement_test(llm, spec, bad, entry["reason"], len(quarantined))
+                        except Exception:
+                            replacement = None
+                        if replacement:
+                            adv = adv.rstrip() + "\n\n\n" + replacement
+                    report.triage.append({**entry, "status": status, "replacement": replacement is not None})
+                    emit("TRIAGE_RESULT", test=entry["test"], status=status, verdict=entry["verdict"],
+                         reason=entry["reason"], replacement=replacement is not None)
+                prev_failed = set(a.failed_tests)
+                if changed:
+                    continue  # rerun the (amended) suite on the same code; this does not consume a repair
+            elif a is not None:
+                prev_failed = set()
 
             if t.passed and a is not None and a.passed:
                 emit("VERIFIED", repairs=report.repairs)
@@ -90,6 +128,8 @@ def run(llm: LLM, spec_text: str, out: Path, max_repairs: int = 3, timeout: int 
             emit("REPAIR_STARTED", repair=report.repairs + 1, of=max_repairs)
             new = repair_impl(llm, spec, impl, failure)
             patches.append(_diff(impl, new))
+            pending_diff = patches[-1]
+            report.repairs += 1
             impl = new
             versions.append(impl)
             emit("REPAIR_COMPLETE", repair=report.repairs, diff=patches[-1], text=impl)
@@ -107,6 +147,8 @@ def _write_artifacts(out: Path, spec_text: str, module: str, tier1: str, adv: st
     (out / "specification.md").write_text(spec_text)
     (out / "tier1_tests.py").write_text(tier1)
     (out / "adversarial_tests.py").write_text(adv)
+    if report.quarantined:
+        (out / "quarantine.json").write_text(json.dumps([t for t in report.triage if t["status"] == "QUARANTINED"], indent=2))
     for i, v in enumerate(versions, 1):
         (out / f"solution_v{i}.py").write_text(v)
     for i, p in enumerate(patches, 1):

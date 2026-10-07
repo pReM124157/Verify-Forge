@@ -28,7 +28,8 @@ Model defaults to `claude-sonnet-5-5`; override with `--model` or `VERIFYFORGE_M
 Each run writes an audit trail to `runs/<timestamp>/`: `specification.md`, `tier1_tests.py`, `solution_vN.py`,
 `adversarial_tests.py`, `repair_N.patch`, `events.jsonl`, `verification_report.{json,md}`.
 
-macOS note: if `import verifyforge` fails in the venv, run `chflags nohidden .venv/lib/python3.13/site-packages/*.pth`.
+macOS note: the venv's editable-install `.pth` can get marked hidden, which Python ignores. Use the `./vf` launcher
+(`./vf demo rate-limiter --offline`) or run `chflags nohidden .venv/lib/python3.13/site-packages/*.pth`.
 
 ## Safety note
 Generated code runs in a subprocess with a timeout inside a temp dir. This is **not** a hardened sandbox; run in a container for untrusted specs.

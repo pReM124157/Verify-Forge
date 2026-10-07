@@ -27,6 +27,10 @@ def _plain_printer(name: str, d: dict) -> None:
         if not d["passed"]:
             lines = [l for l in d["text"].splitlines() if l.startswith(("E ", "FAILED"))][:4]
             print("            " + "\n            ".join(lines))
+    elif name == "TRIAGE_STARTED":
+        print(f"TRIAGE      auditing {d['test'].split('::')[-1]} (spec + test only, no implementation)")
+    elif name == "TRIAGE_RESULT":
+        print(f"TRIAGE      {d['status']}: {d['reason'][:140]}")
     elif name == "REPAIR_STARTED":
         print(f"REPAIR      {d['repair']} / {d['of']} ...")
     elif name == "REGRESSION_DETECTED":

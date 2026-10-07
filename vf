@@ -1,0 +1,4 @@
+#!/bin/sh
+# Launcher that doesn't rely on the venv's editable-install .pth (macOS can mark it hidden, which Python then ignores).
+cd "$(dirname "$0")" || exit 1
+exec env PYTHONPATH="$PWD/src" .venv/bin/python -m verifyforge "$@"

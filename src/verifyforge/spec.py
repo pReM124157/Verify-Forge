@@ -42,14 +42,35 @@ def parse_spec(raw: str) -> Spec:
     return Spec(title, module, reqs, raw)
 
 
+MINIMAL_SCOPE = """MINIMAL-SCOPE RULES
+
+Translate the user's request into the smallest complete, testable specification that satisfies exactly what was asked.
+
+Do NOT:
+- invent convenience APIs;
+- add getters, reset methods, cleanup methods, statistics, retry helpers, observability methods, or configuration
+  options unless explicitly required;
+- expand scope merely because a feature may be useful;
+- turn implementation details into public requirements.
+
+Prefer 5-8 precise behavioral requirements. Every requirement must be directly traceable to the user's request or
+strictly necessary to make that request unambiguous. If an assumption is needed, record it under "assumptions"
+instead of creating a new product feature.
+
+Generate a compact Tier-1 suite covering the contract without duplicating equivalent cases: roughly 5-10 focused
+tests for a small utility.
+"""
+
 ARCHITECT_PROMPT = (
     "Turn this request into a contract. Return a JSON object with keys:\n"
     '  "title": short title,\n'
     '  "module": snake_case python module name,\n'
     '  "specification": prose that states the EXACT public API (class/function names, signatures, constructor args),\n'
     '  "requirements": list of one-line testable requirements,\n'
+    '  "assumptions": list of assumptions you had to make (may be empty),\n'
     '  "tier1_tests": a complete pytest file (imports the module by name) covering every requirement\n'
-    "with deterministic, single-threaded baseline checks.\n\nRequest: "
+    "with deterministic, single-threaded baseline checks.\n\n"
+    + MINIMAL_SCOPE + "\nRequest: "
 )
 
 
@@ -64,7 +85,11 @@ def architect(llm: LLM, request: str) -> tuple[str, str]:
         raise ValueError(f"Architect JSON is missing key {e}.") from e
     if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", module):
         raise ValueError(f"Architect returned an invalid module name: {module!r}")
-    spec_md = f"# {title}\n\nModule: {module}\n\n{specification.strip()}\n\n## Requirements\n"
+    assumptions = [str(a) for a in data.get("assumptions") or []]
+    spec_md = f"# {title}\n\nModule: {module}\n\n{specification.strip()}\n\n"
+    if assumptions:
+        spec_md += "## Assumptions\n" + "".join(f"- {a}\n" for a in assumptions) + "\n"
+    spec_md += "## Requirements\n"
     spec_md += "".join(f"- {r}\n" for r in reqs)
     parse_spec(spec_md)  # fail early on an empty requirement list
     return spec_md, extract_python(tier1)
@@ -75,5 +100,6 @@ def architect_tests(llm: LLM, spec: Spec) -> str:
     return extract_python(llm.complete(
         SYS_TIER1,
         f"Write pytest tests (the file imports `{spec.module}`) covering every requirement with deterministic, "
-        f"single-threaded baseline checks. Name each test with its requirement id, e.g. test_R1_...\n\n{spec.raw}",
+        f"single-threaded baseline checks, compact (roughly 5-10 focused tests, no duplicates). "
+        f"Name each test with its requirement id, e.g. test_R1_...\n\n{spec.raw}",
     ))
