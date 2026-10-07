@@ -5,7 +5,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from .llm import AnthropicLLM
+from .llm import LLM, AnthropicLLM, ClaudeCLI
 from .orchestrator import run, run_request
 
 
@@ -41,6 +41,10 @@ def _plain_printer(name: str, d: dict) -> None:
         print(f"ERROR       {d['error']}", file=sys.stderr)
 
 
+def _make_llm(provider: str, model: str | None) -> LLM:
+    return AnthropicLLM(model) if provider == "api" else ClaudeCLI(model)
+
+
 def _default_out() -> Path:
     return Path("runs") / datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
 
@@ -53,6 +57,8 @@ def main(argv: list[str] | None = None) -> int:
         sp.add_argument("--out", type=Path, default=None, help="default: runs/<timestamp>")
         sp.add_argument("--max-repairs", type=int, default=3)
         sp.add_argument("--model", default=None)
+        sp.add_argument("--provider", choices=["cli", "api"], default="cli",
+                        help="cli: headless Claude Code login (default); api: ANTHROPIC_API_KEY")
 
     r = sub.add_parser("run", help="Run on a spec .md file or a natural-language request (omit for a prompt)")
     r.add_argument("target", nargs="?")
@@ -68,14 +74,14 @@ def main(argv: list[str] | None = None) -> int:
         if args.cmd == "demo":
             from .demos import RATE_LIMITER_REQUEST, rate_limiter_replay
 
-            llm = rate_limiter_replay() if args.offline else AnthropicLLM(args.model)
+            llm = rate_limiter_replay() if args.offline else _make_llm(args.provider, args.model)
             report = run_request(llm, RATE_LIMITER_REQUEST, out, max_repairs=args.max_repairs, on_event=_plain_printer)
         else:
             target = args.target
             if not target:
                 print("VERIFYFORGE\n\nWhat should I build?\n")
                 target = input("> ").strip()
-            llm = AnthropicLLM(args.model)
+            llm = _make_llm(args.provider, args.model)
             path = Path(target)
             if path.suffix == ".md" and path.exists():
                 report = run(llm, path.read_text(), out, args.max_repairs, on_event=_plain_printer)

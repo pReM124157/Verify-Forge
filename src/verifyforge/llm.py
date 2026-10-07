@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import os
 import re
+import subprocess
+import tempfile
 from typing import Protocol
 
 DEFAULT_MODEL = "claude-sonnet-5-5"
@@ -37,6 +39,40 @@ class AnthropicLLM:
             messages=[{"role": "user", "content": prompt}],
         )
         return "".join(b.text for b in resp.content if b.type == "text")
+
+
+class ClaudeCLI:
+    """Model transport via headless Claude Code (`claude -p`), using its existing login: no API key needed.
+
+    Claude only produces text. Tools are disabled and it runs from an empty temp dir, so it cannot read the
+    repo or touch the filesystem; VerifyForge's own runner does all execution.
+    (`--bare` is deliberately not used: it ignores OAuth/keychain login and would require an API key.)"""
+
+    def __init__(self, model: str | None = None, timeout: int = 300, binary: str = "claude"):
+        self.model = model or os.environ.get("VERIFYFORGE_MODEL", DEFAULT_MODEL)
+        self.timeout = timeout
+        self.binary = binary
+
+    def complete(self, system: str, prompt: str) -> str:
+        cmd = [self.binary, "-p", prompt, "--output-format", "json", "--model", self.model,
+               "--system-prompt", system, "--tools", "", "--no-session-persistence", "--disable-slash-commands"]
+        with tempfile.TemporaryDirectory(prefix="vf_model_") as cwd:
+            try:
+                p = subprocess.run(cmd, capture_output=True, text=True, timeout=self.timeout, cwd=cwd)
+            except FileNotFoundError as e:
+                raise RuntimeError("`claude` CLI not found; install Claude Code or use --provider api") from e
+            except subprocess.TimeoutExpired as e:
+                raise TimeoutError(f"claude CLI timed out after {self.timeout}s") from e
+        try:
+            payload = json.loads(p.stdout)
+        except json.JSONDecodeError as e:
+            raise RuntimeError(f"claude CLI returned non-JSON (exit {p.returncode}): {(p.stdout or p.stderr)[:300]}") from e
+        if p.returncode != 0 or payload.get("is_error"):
+            raise RuntimeError(f"claude CLI error (exit {p.returncode}): {str(payload.get('result', p.stderr))[:300]}")
+        result = payload.get("result")
+        if not isinstance(result, str) or not result.strip():
+            raise RuntimeError("claude CLI returned an empty result")
+        return result
 
 
 class ReplayLLM:
