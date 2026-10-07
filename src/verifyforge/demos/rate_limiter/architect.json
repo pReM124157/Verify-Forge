@@ -1,0 +1,14 @@
+{
+  "title": "Thread-Safe Sliding Window Rate Limiter",
+  "module": "rate_limiter",
+  "specification": "Module `rate_limiter` exposes `class RateLimiter` with constructor `RateLimiter(clock=time.monotonic)` where `clock` is a zero-argument callable returning the current time in seconds, and a method `allow(key: str) -> bool` that returns True if the request is accepted and False if it is rejected. The limiter is in-memory and is shared by many threads.",
+  "requirements": [
+    "60 standard requests per rolling 60-second window per client key.",
+    "An additional burst capacity of 10, so no more than 70 accepted requests may exist inside one active window.",
+    "State is isolated between client keys.",
+    "Expired timestamps are automatically removed.",
+    "Rejected requests do not consume capacity.",
+    "Concurrent calls never allow capacity to be exceeded.",
+    "Time can be injected deterministically through the `clock` constructor argument."
+  ]
+}

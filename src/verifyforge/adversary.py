@@ -1,16 +1,15 @@
 from __future__ import annotations
 
-from .generate import SYS, _reqs
-from .llm import LLM, extract_python
+from .llm import LLM, SYS_VERIFIER, extract_python
 from .spec import Spec
 
 
-def adversarial_tests(llm: LLM, spec: Spec, impl: str) -> str:
-    """A separate pass whose only goal is to break the implementation."""
+def adversarial_tests(llm: LLM, spec: Spec) -> str:
+    """Hidden verifier: sees only the specification (which states the public API), never the implementation."""
     return extract_python(llm.complete(
-        SYS,
-        f"You are an adversary. Write pytest tests for module `{spec.module}` that try to BREAK this implementation: "
-        "edge cases, unusual inputs (empty, unicode, huge, whitespace-only), boundary values. "
-        "Only assert behaviour the requirements actually demand; do not invent requirements. "
-        f"Name tests test_ADV_...\n{_reqs(spec)}\n\nImplementation:\n{impl}",
+        SYS_VERIFIER,
+        f"You are an adversary. Write pytest tests for module `{spec.module}` that try to BREAK any implementation "
+        "of this specification: edge cases, unusual inputs, boundary values, concurrency and timing hazards where "
+        "relevant. Only assert behaviour the specification actually demands; do not invent requirements. "
+        f"Name tests test_ADV_...\n\n{spec.raw}",
     ))

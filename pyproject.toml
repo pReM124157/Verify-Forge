@@ -13,6 +13,9 @@ dependencies = ["anthropic>=0.40", "pytest>=8"]
 [project.scripts]
 verifyforge = "verifyforge.cli:main"
 
+[tool.setuptools.package-data]
+"verifyforge.demos" = ["rate_limiter/*"]
+
 [tool.setuptools.packages.find]
 where = ["src"]
 

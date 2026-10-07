@@ -11,13 +11,19 @@ ADV = "from adder import add\n\ndef test_ADV_zero():\n    assert add(0, 0) == 0\
 
 
 class FakeLLM:
-    """Routes on prompt content; first impl is `first`, repairs return GOOD."""
+    """Routes on prompt content; first impl is `first`, repairs return GOOD. Records every prompt."""
 
     def __init__(self, first):
         self.first = first
         self.repairs = 0
+        self.prompts = []
 
     def complete(self, system, prompt):
+        self.prompts.append(prompt)
+        if "software architect" in system:
+            import json
+            return json.dumps({"title": "Add", "module": "adder", "specification": "add(a, b) returns the sum.",
+                               "requirements": ["add(a, b) returns the sum."], "tier1_tests": UNIT})
         if prompt.startswith("Fix module"):
             self.repairs += 1
             return f"```python\n{GOOD}```"
@@ -35,7 +41,7 @@ def test_parse_spec():
 
 def test_pass_first_round(tmp_path: Path):
     r = run(FakeLLM(GOOD), SPEC, tmp_path)
-    assert r.status == "VERIFIED" and len(r.rounds) == 1
+    assert r.status == "VERIFIED" and len(r.rounds) == 1 and r.repairs == 0
     assert (tmp_path / "verification_report.md").exists()
 
 
@@ -52,5 +58,5 @@ def test_give_up(tmp_path: Path):
                 return f"```python\n{BAD}```"
             return super().complete(system, prompt)
 
-    r = run(Stubborn(BAD), SPEC, tmp_path, max_rounds=2)
+    r = run(Stubborn(BAD), SPEC, tmp_path, max_repairs=1)
     assert r.status == "UNVERIFIED" and len(r.rounds) == 2

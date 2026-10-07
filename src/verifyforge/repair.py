@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-from .generate import SYS, _reqs
-from .llm import LLM, extract_python
+from .llm import LLM, SYS_REPAIR, extract_python
 from .spec import Spec
 
 
 def repair_impl(llm: LLM, spec: Spec, impl: str, failure: str) -> str:
     return extract_python(llm.complete(
-        SYS,
+        SYS_REPAIR,
         f"Fix module `{spec.module}` so all tests pass. Return the full corrected file. "
-        f"Do not weaken requirements.\n{_reqs(spec)}\n\nCurrent code:\n{impl}\n\nFailing output:\n{failure}",
+        f"Do not weaken the specification.\n\n{spec.raw}\n\nCurrent code:\n{impl}\n\nFailing output:\n{failure}",
     ))

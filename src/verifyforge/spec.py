@@ -3,6 +3,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from .llm import LLM, SYS_ARCHITECT, SYS_TIER1, extract_json, extract_python
+
 
 @dataclass
 class Requirement:
@@ -40,17 +42,38 @@ def parse_spec(raw: str) -> Spec:
     return Spec(title, module, reqs, raw)
 
 
-SPEC_SYS = "You are a requirements engineer. Reply with only a markdown spec, no code fences."
+ARCHITECT_PROMPT = (
+    "Turn this request into a contract. Return a JSON object with keys:\n"
+    '  "title": short title,\n'
+    '  "module": snake_case python module name,\n'
+    '  "specification": prose that states the EXACT public API (class/function names, signatures, constructor args),\n'
+    '  "requirements": list of one-line testable requirements,\n'
+    '  "tier1_tests": a complete pytest file (imports the module by name) covering every requirement\n'
+    "with deterministic, single-threaded baseline checks.\n\nRequest: "
+)
 
 
-def draft_spec(llm, request: str) -> str:
-    """Turn a natural-language request into the markdown spec format parse_spec expects."""
-    text = llm.complete(
-        SPEC_SYS,
-        "Turn this request into a spec in exactly this format:\n"
-        "# <Title>\n\nModule: <snake_case_name>\n\n## Requirements\n- <one testable requirement per bullet>\n\n"
-        f"Request: {request}",
-    )
-    text = text.strip().strip("`").removeprefix("markdown").strip()
-    parse_spec(text)  # fail early on malformed output
-    return text + "\n"
+def architect(llm: LLM, request: str) -> tuple[str, str]:
+    """Natural-language request -> (markdown spec, tier-1 tests). Written before any implementation exists."""
+    data = extract_json(llm.complete(SYS_ARCHITECT, ARCHITECT_PROMPT + request))
+    try:
+        title, module = str(data["title"]), str(data["module"])
+        specification, tier1 = str(data["specification"]), str(data["tier1_tests"])
+        reqs = [str(r) for r in data["requirements"]]
+    except KeyError as e:
+        raise ValueError(f"Architect JSON is missing key {e}.") from e
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", module):
+        raise ValueError(f"Architect returned an invalid module name: {module!r}")
+    spec_md = f"# {title}\n\nModule: {module}\n\n{specification.strip()}\n\n## Requirements\n"
+    spec_md += "".join(f"- {r}\n" for r in reqs)
+    parse_spec(spec_md)  # fail early on an empty requirement list
+    return spec_md, extract_python(tier1)
+
+
+def architect_tests(llm: LLM, spec: Spec) -> str:
+    """Tier-1 tests from the spec alone, for hand-written spec files."""
+    return extract_python(llm.complete(
+        SYS_TIER1,
+        f"Write pytest tests (the file imports `{spec.module}`) covering every requirement with deterministic, "
+        f"single-threaded baseline checks. Name each test with its requirement id, e.g. test_R1_...\n\n{spec.raw}",
+    ))
