@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "VerifyForge — Autonomous Specification-Driven Software Engineering Agent"
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = ["anthropic>=0.40", "pytest>=8"]
+dependencies = ["anthropic>=0.40", "pytest>=8", "rich>=13"]
 
 [project.scripts]
 verifyforge = "verifyforge.cli:main"

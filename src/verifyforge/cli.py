@@ -61,6 +61,9 @@ def main(argv: list[str] | None = None) -> int:
         sp.add_argument("--out", type=Path, default=None, help="default: runs/<timestamp>")
         sp.add_argument("--max-repairs", type=int, default=3)
         sp.add_argument("--model", default=None)
+        sp.add_argument("--ui", action="store_true", help="Rich three-pane presentation (event subscriber only)")
+        sp.add_argument("--pace", type=float, default=None,
+                        help="UI hold-time multiplier so an audience can read; default 1.0 offline, 0 live")
         sp.add_argument("--provider", choices=["cli", "api"], default="cli",
                         help="cli: headless Claude Code login (default); api: ANTHROPIC_API_KEY")
 
@@ -73,13 +76,31 @@ def main(argv: list[str] | None = None) -> int:
     common(d)
     args = p.parse_args(argv)
     out = args.out or _default_out()
+    offline = args.cmd == "demo" and args.offline
+    hook = _plain_printer
+    ui = None
+    if args.ui:
+        from .ui import VerifyForgeUI
+
+        mode = "OFFLINE DEMO" if offline else ("LIVE · ANTHROPIC API" if args.provider == "api" else "LIVE · CLAUDE CLI")
+        pace = args.pace if args.pace is not None else (1.0 if offline else 0.0)
+        goal = ""
+        if args.cmd == "demo":
+            from .demos import RATE_LIMITER_REQUEST as goal
+        elif args.target:
+            goal = args.target
+        ui = VerifyForgeUI(mode, goal=goal, max_repairs=args.max_repairs, pace=pace,
+                           subtitle="REPLAYED MODEL OUTPUT · REAL PYTEST" if offline else "LIVE MODEL OUTPUT · REAL PYTEST")
+        hook = ui
 
     try:
+        if ui:
+            ui.__enter__()
         if args.cmd == "demo":
             from .demos import RATE_LIMITER_REQUEST, rate_limiter_replay
 
             llm = rate_limiter_replay() if args.offline else _make_llm(args.provider, args.model)
-            report = run_request(llm, RATE_LIMITER_REQUEST, out, max_repairs=args.max_repairs, on_event=_plain_printer)
+            report = run_request(llm, RATE_LIMITER_REQUEST, out, max_repairs=args.max_repairs, on_event=hook)
         else:
             target = args.target
             if not target:
@@ -88,12 +109,20 @@ def main(argv: list[str] | None = None) -> int:
             llm = _make_llm(args.provider, args.model)
             path = Path(target)
             if path.suffix == ".md" and path.exists():
-                report = run(llm, path.read_text(), out, args.max_repairs, on_event=_plain_printer)
+                report = run(llm, path.read_text(), out, args.max_repairs, on_event=hook)
             else:
-                report = run_request(llm, target, out, max_repairs=args.max_repairs, on_event=_plain_printer)
+                report = run_request(llm, target, out, max_repairs=args.max_repairs, on_event=hook)
     except ValueError as e:  # e.g. malformed Architect output: nothing was built
+        if ui:
+            ui.__exit__(None, None, None)
         print(f"ERROR       {e}", file=sys.stderr)
         return 2
+    except BaseException:
+        if ui:
+            ui.__exit__(None, None, None)
+        raise
+    if ui:
+        ui.__exit__(None, None, None)
     print(f"Report: {out}/verification_report.md")
     return 0 if report.status == "VERIFIED" else 1
 
