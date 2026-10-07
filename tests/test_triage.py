@@ -112,3 +112,42 @@ def test_architect_prompt_enforces_minimal_scope_and_records_assumptions(tmp_pat
     assert "MINIMAL-SCOPE RULES" in seen[0] and "Do NOT" in seen[0] and "5-8" in seen[0]
     assert "## Assumptions\n- ints only" in spec_md and "R1" not in spec_md
     assert MINIMAL_SCOPE.strip() in seen[0]
+
+
+def test_replacement_that_redefines_shared_helpers_is_rejected(tmp_path: Path):
+    from verifyforge.adversary import replacement_test
+    from verifyforge.spec import parse_spec
+
+    spec = parse_spec(SPEC)
+
+    def reply(code):
+        class L:
+            def complete(self, system, prompt):
+                return f"```python\n{code}```"
+        return L()
+
+    ok = "import math\n\ndef test_ADV_replacement_1():\n    assert 1 + 1 == 2\n"
+    shadow = "def fill(a, b, c):\n    pass\n\ndef test_ADV_replacement_1():\n    assert True\n"
+    two = "def test_ADV_replacement_1():\n    pass\n\ndef test_other():\n    pass\n"
+    wrong_name = "def test_something_else():\n    pass\n"
+    assert replacement_test(reply(ok), spec, "t", "r", 1) is not None
+    for bad in (shadow, two, wrong_name, "def broken(:"):
+        assert replacement_test(reply(bad), spec, "t", "r", 1) is None
+
+
+def test_run5_scenario_replacement_cannot_break_other_tests(tmp_path: Path):
+    # Suite has a shared helper; the model's "replacement" tries to redefine it. It must be dropped (reported as NO),
+    # and the remaining suite must still run against the original helper.
+    adv = ADV.replace("from adder import add", "from adder import add\n\ndef helper(n):\n    return n\n") + \
+        "\n\ndef test_ADV_uses_helper():\n    assert add(helper(2), 3) == 5\n" + WRONG
+
+    class Shadowing(Scripted):
+        def complete(self, system, prompt):
+            if prompt.startswith("Replace an invalid test"):
+                return "```python\ndef helper(a, b):\n    return 0\n\ndef test_ADV_replacement_1():\n    pass\n```"
+            return super().complete(system, prompt)
+
+    r = run(Shadowing(GOOD, adv, verdict("INVALID")), SPEC, tmp_path)
+    assert r.status == "VERIFIED" and r.triage[0]["status"] == "QUARANTINED" and r.triage[0]["replacement"] is False
+    assert "Replacement test generated: NO" in (tmp_path / "verification_report.md").read_text()
+    assert "def helper(n)" in (tmp_path / "adversarial_tests.py").read_text()

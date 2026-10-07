@@ -102,8 +102,8 @@ def run(llm: LLM, spec_text: str, out: Path, max_repairs: int = 3, timeout: int 
                         quarantined.append(node)
                         changed = True
                         try:
-                            bad, _ = extract_test_source(adv, node)
-                            replacement = replacement_test(llm, spec, bad, entry["reason"], len(quarantined))
+                            bad, helpers = extract_test_source(adv, node)
+                            replacement = replacement_test(llm, spec, bad, entry["reason"], len(quarantined), helpers)
                         except Exception:
                             replacement = None
                         if replacement:
