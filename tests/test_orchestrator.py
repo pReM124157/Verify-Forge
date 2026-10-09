@@ -20,6 +20,10 @@ class FakeLLM:
 
     def complete(self, system, prompt):
         self.prompts.append(prompt)
+        if "requirements auditor" in system:  # independent preservation audit: everything preserved
+            import json
+            return json.dumps({"requirements": [{"user_requirement": "the user's request", "mapped": ["R1"],
+                                                 "status": "PRESERVED", "evidence": "R1 states it."}]})
         if "software architect" in system:
             import json
             return json.dumps({"title": "Add", "module": "adder", "specification": "add(a, b) returns the sum.",

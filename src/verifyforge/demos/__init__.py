@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from ..llm import SYS_ARCHITECT, SYS_BUILDER, SYS_REPAIR, SYS_TIER1, SYS_VERIFIER, ReplayLLM
+from ..llm import SYS_ARCHITECT, SYS_BUILDER, SYS_PRESERVATION, SYS_REPAIR, SYS_TIER1, SYS_VERIFIER, ReplayLLM
 
 _DIR = Path(__file__).parent / "rate_limiter"
 
@@ -24,6 +24,7 @@ def rate_limiter_replay() -> ReplayLLM:
     arch["tier1_tests"] = (_DIR / "tier1_tests.py").read_text()
     return ReplayLLM({
         SYS_ARCHITECT: [json.dumps(arch)],
+        SYS_PRESERVATION: [(_DIR / "preservation.json").read_text()],
         SYS_BUILDER: [_code("solution_v1.py")],
         SYS_VERIFIER: [_code("adversarial_tests.py")],
         SYS_REPAIR: [_code("solution_v2.py")],

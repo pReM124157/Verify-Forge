@@ -98,6 +98,10 @@ class VerifyForgeUI:
         self.error = ""
         self.repairs_used = 0
         self.takeover = False
+        self.preserved: tuple[int, int] | None = None  # (preserved, total) user requirements from the audit
+        self.spec_rejected = False
+        self.reason = ""
+        self.triage_suite = "adversarial"
 
     # ----- lifecycle -------------------------------------------------------------------------------------
     def __enter__(self) -> "VerifyForgeUI":
@@ -132,6 +136,13 @@ class VerifyForgeUI:
         elif name == "SPEC_GENERATED":
             self.requirements = [r.text for r in parse_spec(d["text"]).requirements]
             self.state = "SPEC LOCKED"
+        elif name == "PRESERVATION_PASSED":
+            self.preserved, self.spec_rejected = (d["preserved"], d["total"]), False
+        elif name == "SPEC_REJECTED":
+            self.preserved, self.spec_rejected, self.requirements = (d["preserved"], d["total"]), True, []
+            self.state = "SPEC REJECTED"
+        elif name == "SPEC_REGENERATING":
+            self.state = "REGENERATING SPEC"
         elif name == "TIER1_TESTS_READY":
             self.tier1_ready = True
         elif name == "BUILD_STARTED":
@@ -155,7 +166,8 @@ class VerifyForgeUI:
                         "assertions": _assertion_lines(d["text"])}
             self.state = "ADVERSARIAL FAILED" if not d["passed"] else self.state
         elif name == "TRIAGE_STARTED":
-            self.state, self.triaging = "TRIAGING HIDDEN TEST", d["test"].split("::")[-1]
+            self.state, self.triaging = "TRIAGING TEST", d["test"].split("::")[-1]
+            self.triage_suite = d.get("suite", "adversarial")
         elif name == "TRIAGE_RESULT":
             self.triage.append(d)
             self.triaging = ""
@@ -175,6 +187,7 @@ class VerifyForgeUI:
             self.ended = time.monotonic()
         elif name == "UNVERIFIED":
             self.final, self.state, self.repairs_used = "UNVERIFIED", "UNVERIFIED", d["repairs"]
+            self.reason = d.get("reason", "")
             self.ended = time.monotonic()
         elif name == "ERROR":
             self.final, self.state, self.error = "ERROR", "ERROR", d["error"]
@@ -229,18 +242,37 @@ class VerifyForgeUI:
         parts: list[RenderableType] = []
         if self.repair_n and self.requirements:  # collapsed once a patch lands, like the finished layout
             parts += [Text("SPEC LOCKED ✓", style=GREEN), Text(f"{len(self.requirements)} requirement{'' if len(self.requirements) == 1 else 's'}", style=DIM)]
+            if self.preserved:
+                parts.append(Text(f"{self.preserved[0]} / {self.preserved[1]} user requirements preserved", style=GREEN))
             if self.tier1_ready:
                 parts.append(Text("Tier-1 tests written before code ✓", style=DIM))
             return self._pane("ARCHITECT", Group(*parts), "green")
-        parts += [Text("USER GOAL", style=CYAN), Text(_clip(self.goal or "…", 190)), Text("")]
-        if not self.requirements:
-            parts.append(self._busy("drafting specification + Tier-1 tests"))
+        headline, items = _split_goal(self.goal)
+        parts += [Text("USER GOAL", style=CYAN), Text(_clip(headline or "…", 150 if items else 190)), Text("")]
+        if items:  # a multi-line request: show its own requirement lines (full text stays in the run and the report)
+            tick = ("✓ ", GREEN) if (self.preserved and not self.spec_rejected) else ("• ", DIM)
+            parts.append(Text(f"YOUR REQUIREMENTS ({len(items)})", style=CYAN))
+            parts += [Text.assemble(tick, _clip(i, 34)) for i in items[:6]]
+            if len(items) > 6:
+                parts.append(Text(f"+ {len(items) - 6} more", style=DIM))
+            parts.append(Text(""))
+        if self.spec_rejected and self.preserved:
+            parts += [Text("SPEC REJECTED ✗", style=RED),
+                      Text(f"{self.preserved[0]} / {self.preserved[1]} user requirements preserved", style=RED),
+                      self._busy("regenerating specification")]
+        elif not self.requirements:
+            if self.preserved:
+                parts += [Text(f"{self.preserved[0]} / {self.preserved[1]} user requirements preserved ✓", style=GREEN)]
+            parts.append(self._busy("drafting specification + Tier-1 tests" if not self.preserved else "locking specification"))
         else:
             parts.append(Text("INVARIANTS", style=CYAN))
-            for r in self.requirements[:8]:
+            for r in self.requirements[:(3 if items else 8)]:
                 parts.append(Text.assemble(("✓ ", GREEN), _clip(r, 96)))
-            if len(self.requirements) > 8:
-                parts.append(Text(f"+ {len(self.requirements) - 8} more", style=DIM))
+            shown = 3 if items else 8
+            if len(self.requirements) > shown:
+                parts.append(Text(f"+ {len(self.requirements) - shown} more", style=DIM))
+            if self.preserved and not self.spec_rejected:
+                parts += [Text(""), Text(f"{self.preserved[0]} / {self.preserved[1]} user requirements preserved ✓", style=GREEN)]
             if self.tier1_ready:
                 parts += [Text(""), Text("Tier-1 tests written before any code ✓", style=GREEN)]
         return self._pane("ARCHITECT", Group(*parts), "green" if self.requirements else "cyan")
@@ -270,6 +302,10 @@ class VerifyForgeUI:
         border = "green" if self.repair_state == "applied" or self.build_state == "done" else "cyan"
         return self._pane("BUILDER", Group(*parts), border)
 
+    @staticmethod
+    def _triage_title(suite: str) -> str:
+        return "TIER-1 TRIAGE" if suite in ("tier1", "Tier-1") else "ADVERSARIAL TRIAGE"
+
     def verifier_panel(self) -> Panel:
         parts: list[RenderableType] = []
 
@@ -293,11 +329,11 @@ class VerifyForgeUI:
         suite("TIER-1", self.tier1, "waiting for build")
         suite("ADVERSARIAL", self.adv, "runs after Tier-1 passes")
         if self.triaging:
-            parts += [Text("ADVERSARIAL TRIAGE", style=AMBER), Text(self.triaging, style="white"),
+            parts += [Text(self._triage_title(self.triage_suite), style=AMBER), Text(self.triaging, style="white"),
                       self._busy("auditing test against spec only"), Text("")]
         for t in self.triage[-1:]:
             quarantined = t["status"] == "QUARANTINED"
-            parts += [Text("ADVERSARIAL TRIAGE", style=AMBER), Text(_clip(t["test"].split("::")[-1], 52), style="white"),
+            parts += [Text(self._triage_title(t.get("suite", "adversarial")), style=AMBER), Text(_clip(t["test"].split("::")[-1], 52), style="white"),
                       Text("INVALID TEST ✗" if quarantined else t["status"].upper(), style=RED if quarantined else AMBER),
                       Text(_clip(t["reason"], 230), style="white")]
             if quarantined:
@@ -331,6 +367,11 @@ class VerifyForgeUI:
 
         if self.final == "ERROR":
             row("ERROR", _clip(self.error, 60), False)
+        elif self.reason:
+            row("REASON", _clip(self.reason.replace("_", " ").title(), 60), False)
+            if self.preserved:
+                row("PRESERVED", f"{self.preserved[0]} / {self.preserved[1]} user requirements", False)
+            row("BUILDER", "NEVER STARTED")
         else:
             row("TIER-1", "PASS" if tier1_ok else "FAIL", tier1_ok)
             row("ADVERSARIAL", "PASS" if adv_ok else "FAIL", adv_ok)
@@ -344,6 +385,15 @@ class VerifyForgeUI:
         body = Group(Text(""), Align.center(Text(word, style=f"bold {color}")), Text(""), Align.center(rows), Text(""),
                      Align.center(Text(tail, style=f"italic {color}")), Text(""))
         return Panel(body, box=box.DOUBLE, border_style=color, padding=(1, 8), width=76)
+
+
+def _split_goal(goal: str) -> tuple[str, list[str]]:
+    """(first line, bullet/numbered requirement lines) of a multi-line request; ([whole text], []) for one line."""
+    lines = [l.strip() for l in goal.splitlines() if l.strip()]
+    if len(lines) < 2:
+        return (lines[0] if lines else ""), []
+    items = [re.sub(r"^([-*•]|\d+[.)])\s+", "", l) for l in lines[1:] if re.match(r"^([-*•]|\d+[.)])\s+", l)]
+    return lines[0], items
 
 
 def _clip(s: str, n: int) -> str:

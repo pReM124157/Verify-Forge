@@ -17,6 +17,7 @@ SYS_TIER1 = "You are the architect writing the acceptance tests. Reply with exac
 SYS_BUILDER = "You are a meticulous Python engineer. Reply with exactly one fenced python code block."
 SYS_VERIFIER = "You are an independent adversarial verifier. Reply with exactly one fenced python code block."
 SYS_TRIAGE = "You are an impartial test auditor. Reply with exactly one JSON object and nothing else."
+SYS_PRESERVATION = "You are an independent requirements auditor. Reply with exactly one JSON object and nothing else."
 SYS_REPAIR = "You are a meticulous Python engineer fixing a failing module. Reply with exactly one fenced python code block."
 
 

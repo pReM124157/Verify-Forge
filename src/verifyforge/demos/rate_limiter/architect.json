@@ -10,5 +10,56 @@
     "Rejected requests do not consume capacity.",
     "Concurrent calls never allow capacity to be exceeded.",
     "Time can be injected deterministically through the `clock` constructor argument."
+  ],
+  "requirement_traceability": [
+    {
+      "user_requirement": "60 requests per rolling 60 seconds per client key",
+      "mapped_requirements": [
+        "R1"
+      ],
+      "status": "preserved"
+    },
+    {
+      "user_requirement": "burst of 10, never more than 70 in one window",
+      "mapped_requirements": [
+        "R2"
+      ],
+      "status": "preserved"
+    },
+    {
+      "user_requirement": "isolated per key",
+      "mapped_requirements": [
+        "R3"
+      ],
+      "status": "preserved"
+    },
+    {
+      "user_requirement": "expired entries removed",
+      "mapped_requirements": [
+        "R4"
+      ],
+      "status": "preserved"
+    },
+    {
+      "user_requirement": "rejected requests consume nothing",
+      "mapped_requirements": [
+        "R5"
+      ],
+      "status": "preserved"
+    },
+    {
+      "user_requirement": "safe under concurrent calls",
+      "mapped_requirements": [
+        "R6"
+      ],
+      "status": "preserved"
+    },
+    {
+      "user_requirement": "injectable time for tests",
+      "mapped_requirements": [
+        "R7"
+      ],
+      "status": "preserved"
+    }
   ]
 }

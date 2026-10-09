@@ -49,7 +49,7 @@ def test_invalid_test_is_quarantined_replaced_and_run_verifies(tmp_path: Path):
     assert t["status"] == "QUARANTINED" and t["replacement"] and "1+1" in t["reason"]
     assert "test_ADV_replacement_1" in (tmp_path / "adversarial_tests.py").read_text()
     md = (tmp_path / "verification_report.md").read_text()
-    assert "Adversarial test triage" in md and "QUARANTINED" in md and "Replacement test generated: YES" in md
+    assert "Test triage (Tier-1 and adversarial)" in md and "QUARANTINED" in md and "Replacement test generated: YES" in md
     assert json.loads((tmp_path / "quarantine.json").read_text())[0]["test"].endswith("wrong_arithmetic")
 
 

@@ -1,0 +1,69 @@
+{
+  "requirements": [
+    {
+      "user_requirement": "thread-safe in-memory sliding-window rate limiter",
+      "mapped": [
+        "SPEC"
+      ],
+      "status": "PRESERVED",
+      "evidence": "The specification defines `class RateLimiter` shared by many threads, in-memory."
+    },
+    {
+      "user_requirement": "60 requests per rolling 60 seconds per client key",
+      "mapped": [
+        "R1"
+      ],
+      "status": "PRESERVED",
+      "evidence": "R1 states 60 standard requests per rolling 60-second window per client key."
+    },
+    {
+      "user_requirement": "burst of 10, never more than 70 in one window",
+      "mapped": [
+        "R2"
+      ],
+      "status": "PRESERVED",
+      "evidence": "R2 states burst capacity of 10 and a maximum of 70 accepted requests per window."
+    },
+    {
+      "user_requirement": "isolated per key",
+      "mapped": [
+        "R3"
+      ],
+      "status": "PRESERVED",
+      "evidence": "R3: state is isolated between client keys."
+    },
+    {
+      "user_requirement": "expired entries removed",
+      "mapped": [
+        "R4"
+      ],
+      "status": "PRESERVED",
+      "evidence": "R4: expired timestamps are automatically removed."
+    },
+    {
+      "user_requirement": "rejected requests consume nothing",
+      "mapped": [
+        "R5"
+      ],
+      "status": "PRESERVED",
+      "evidence": "R5: rejected requests do not consume capacity."
+    },
+    {
+      "user_requirement": "safe under concurrent calls",
+      "mapped": [
+        "R6"
+      ],
+      "status": "PRESERVED",
+      "evidence": "R6: concurrent calls never allow capacity to be exceeded."
+    },
+    {
+      "user_requirement": "injectable time for tests",
+      "mapped": [
+        "R7",
+        "SPEC"
+      ],
+      "status": "PRESERVED",
+      "evidence": "R7 and the constructor `RateLimiter(clock=time.monotonic)` provide injectable time."
+    }
+  ]
+}
