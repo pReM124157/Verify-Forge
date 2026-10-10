@@ -4,6 +4,8 @@ import json
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
+from .llm import redact
+
 
 @dataclass
 class Round:
@@ -33,6 +35,7 @@ class Report:
     unverified_reason: str = ""
     subscriber_errors: list[str] = field(default_factory=list)  # event-subscriber exceptions (isolated, never abort a run)
     model: str = ""
+    model_usage: dict = field(default_factory=dict)  # per-role model, calls, tokens, seconds (never any secret)
 
     @property
     def quarantined(self) -> int:
@@ -53,7 +56,7 @@ class Report:
 
     def write(self, out: Path) -> None:
         data = asdict(self) | {"status": self.status, "quarantined": self.quarantined}
-        (out / "verification_report.json").write_text(json.dumps(data, indent=2))
+        (out / "verification_report.json").write_text(redact(json.dumps(data, indent=2)))
 
         def cell(v):
             return "not run" if v is None else ("pass" if v else "FAIL")
@@ -99,6 +102,13 @@ class Report:
                           "Observed failure:", "```", t["failure"], "```"]
                 if t["status"] == "QUARANTINED":
                     lines.append(f"Replacement test generated: {'YES' if t['replacement'] else 'NO'}")
+        if self.model_usage:
+            u = self.model_usage
+            lines += ["", "## Model usage", "| Role | Model | Calls | Input tokens | Output tokens | Seconds |", "|---|---|---|---|---|---|"]
+            lines += [f"| {role} | {r['model']} | {r['calls']} | {r['input_tokens']} | {r['output_tokens']} | {r['seconds']} |"
+                      for role, r in u["roles"].items()]
+            t = u["total"]
+            lines.append(f"| **total** | | {t['calls']} | {t['input_tokens']} | {t['output_tokens']} | {t['seconds']} |")
         if self.subscriber_errors:
             lines += ["", "## Event subscriber errors (isolated; the verification was not affected)"] + [f"- {e}" for e in self.subscriber_errors]
         if self.error:
@@ -107,4 +117,4 @@ class Report:
             if r.diff:
                 lines += ["", f"## Repair diff before round {r.n}" + (" (REGRESSION)" if r.regression else ""),
                           "```diff", r.diff, "```"]
-        (out / "verification_report.md").write_text("\n".join(lines) + "\n")
+        (out / "verification_report.md").write_text(redact("\n".join(lines) + "\n"))

@@ -7,7 +7,7 @@ from typing import Callable
 
 from .adversary import MAX_ADVERSARIAL_TESTS, bounded_adversarial, replacement_test
 from .generate import generate_impl
-from .llm import LLM, SYS_TIER1
+from .llm import LLM, SYS_TIER1, redact
 from .repair import repair_impl
 from .report import Report, Round
 from .sandbox import run_pytest
@@ -18,6 +18,19 @@ from .triage import extract_test_source, triage_test
 MAX_QUARANTINES = 3
 
 EventHook = Callable[[str, dict], None]
+
+
+def _model_label(llm) -> str:
+    return str(getattr(llm, "model_label", "") or getattr(llm, "model", "") or "")
+
+
+def _usage(llm) -> dict:
+    """Provider usage telemetry (tokens, model, seconds per role), if the provider keeps any."""
+    try:
+        fn = getattr(llm, "usage_summary", None)
+        return fn() if callable(fn) else {}
+    except Exception:
+        return {}
 
 
 def _out(t) -> str:
@@ -51,7 +64,7 @@ def run(llm: LLM, spec_text: str, out: Path, max_repairs: int = 3, timeout: int 
     spec = parse_spec(spec_text)
     out.mkdir(parents=True, exist_ok=True)
     report = Report(spec.title, spec.module, [r.__dict__ for r in spec.requirements], request=request,
-                    model=str(getattr(llm, "model", "") or ""))
+                    model=_model_label(llm))
     if preflight:  # results of the requirement-preservation gate, which ran before this point
         report.traceability, report.preservation = preflight["traceability"], preflight["preservation"]
         events[:0] = preflight["events"]
@@ -174,10 +187,13 @@ def run(llm: LLM, spec_text: str, out: Path, max_repairs: int = 3, timeout: int 
             emit("REPAIR_COMPLETE", repair=report.repairs, diff=patches[-1], text=impl)
             emit("FINAL_VERIFY" if report.repairs >= max_repairs else "REVERIFY", round=n + 1)
     except Exception as e:  # API/network failure etc: record honestly, never claim VERIFIED
-        report.error = f"{type(e).__name__}: {e}"
+        report.error = redact(f"{type(e).__name__}: {e}")
+        if getattr(e, "code", ""):
+            report.unverified_reason = e.code  # e.g. PROVIDER_RATE_LIMIT
         emit("ERROR", error=report.error)
 
     report.subscriber_errors = hook_errors
+    report.model_usage = _usage(llm)
     _write_artifacts(out, spec_text, spec.module, tier1 or "", adv, versions, patches, events, report)
     return report
 
@@ -195,7 +211,7 @@ def _write_artifacts(out: Path, spec_text: str, module: str, tier1: str, adv: st
         (out / f"repair_{i}.patch").write_text(p)
     if versions:
         (out / f"{module}.py").write_text(versions[-1])
-    (out / "events.jsonl").write_text("".join(json.dumps(e) + "\n" for e in events))
+    (out / "events.jsonl").write_text(redact("".join(json.dumps(e) + "\n" for e in events)))
     report.write(out)
 
 
@@ -207,15 +223,16 @@ def _feedback(missing: list[str]) -> str:
 
 def _architect_unavailable(llm, request, out, err, emit, events, specs, rejected, hook_errors) -> Report:
     """The Architect could not be reached: record an honest UNVERIFIED run (directory, events, report) instead of crashing."""
-    reason = f"{type(err).__name__}: {err}"
+    reason = redact(f"{type(err).__name__}: {err}")
+    code = getattr(err, "code", "") or "ARCHITECT_UNAVAILABLE"
     report = Report("(no specification: the Architect was unavailable)", "", [], request=request, error=reason,
-                    unverified_reason="ARCHITECT_UNAVAILABLE", preservation={"attempts": len(specs), "rejected": rejected, "passed": False},
-                    subscriber_errors=hook_errors, model=str(getattr(llm, "model", "") or ""))
-    emit("UNVERIFIED", repairs=0, reason="ARCHITECT_UNAVAILABLE", error=reason)
+                    unverified_reason=code, preservation={"attempts": len(specs), "rejected": rejected, "passed": False},
+                    subscriber_errors=hook_errors, model=_model_label(llm), model_usage=_usage(llm))
+    emit("UNVERIFIED", repairs=0, reason=code, error=reason)
     out.mkdir(parents=True, exist_ok=True)
     for i, text in enumerate(specs, 1):
         (out / f"specification_rejected_{i}.md").write_text(text)
-    (out / "events.jsonl").write_text("".join(json.dumps(e) + "\n" for e in events))
+    (out / "events.jsonl").write_text(redact("".join(json.dumps(e) + "\n" for e in events)))
     report.write(out)
     return report
 
@@ -281,15 +298,15 @@ def run_request(llm: LLM, request: str, out: Path, **kw) -> Report:
 
     # Rejected: no Builder, no tests executed, no code. Record the evidence and end UNVERIFIED.
     spec = parse_spec(specs[-1])
-    reason = REASON_NOT_PRESERVED if pres.audit_ok else REASON_AUDIT_UNAVAILABLE
+    reason = REASON_NOT_PRESERVED if pres.audit_ok else (pres.audit_code or REASON_AUDIT_UNAVAILABLE)
     report = Report(spec.title, spec.module, [r.__dict__ for r in spec.requirements], request=request,
                     traceability=pres.items, preservation=info, unverified_reason=reason,
                     error=pres.audit_error if not pres.audit_ok else "", subscriber_errors=hook_errors,
-                    model=str(getattr(llm, "model", "") or ""))
+                    model=_model_label(llm), model_usage=_usage(llm))
     emit("UNVERIFIED", repairs=0, reason=reason, preserved=pres.preserved, total=pres.total)
     out.mkdir(parents=True, exist_ok=True)
     for i, text in enumerate(specs, 1):
         (out / f"specification_rejected_{i}.md").write_text(text)
-    (out / "events.jsonl").write_text("".join(json.dumps(e) + "\n" for e in events))
+    (out / "events.jsonl").write_text(redact("".join(json.dumps(e) + "\n" for e in events)))
     report.write(out)
     return report

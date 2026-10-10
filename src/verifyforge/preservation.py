@@ -38,6 +38,7 @@ class Preservation:
     items: list[dict] = field(default_factory=list)  # {"user_requirement","mapped","status","evidence","source"}
     audit_ok: bool = True
     audit_error: str = ""
+    audit_code: str = ""  # a provider reason code (e.g. PROVIDER_RATE_LIMIT) when the audit call failed
 
     @property
     def total(self) -> int:
@@ -257,16 +258,18 @@ def check_preservation(llm: LLM, request: str, spec_text: str, claims: list[dict
     """Both layers must agree. Unusable audit output (after one retry) fails closed."""
     structural = deterministic_checks(request, spec_text)
     items: list[dict] = []
-    err = ""
+    err, code = "", ""
     for _ in range(2):  # one retry for flaky/malformed auditor output
         try:
             items = _parse_audit(llm.complete(SYS_PRESERVATION, _audit_prompt(request, spec_text, claims or [])))
-            err = ""
+            err = code = ""
             break
         except Exception as e:  # malformed JSON, CLI/API failure, etc.
-            err = f"{type(e).__name__}: {e}"
+            err, code = f"{type(e).__name__}: {e}", getattr(e, "code", "")
+            if code in ("PROVIDER_AUTH_ERROR", "PROVIDER_BILLING"):
+                break  # retrying an auth/billing failure cannot help
     if err:
-        return Preservation(False, structural, audit_ok=False, audit_error=err)
+        return Preservation(False, structural, audit_ok=False, audit_error=err, audit_code=code)
     items = _validate_ids(items, spec_text)
     items = _merge(items, structural) + _coverage_gaps(request, items)
     return Preservation(all(i["status"] == PRESERVED for i in items), items)

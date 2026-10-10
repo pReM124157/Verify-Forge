@@ -5,7 +5,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from .llm import LLM, AnthropicLLM, ClaudeCLI
+from .llm import LLM, AnthropicLLM, ClaudeCLI, ProviderError, health_check, resolve_models
 from .orchestrator import run, run_request
 
 
@@ -59,8 +59,71 @@ def _plain_printer(name: str, d: dict) -> None:
         print(f"ERROR       {d['error']}", file=sys.stderr)
 
 
-def _make_llm(provider: str, model: str | None) -> LLM:
-    return AnthropicLLM(model) if provider == "api" else ClaudeCLI(model)
+def load_env_file(path: Path | None = None, prefix: str | None = None) -> list[str]:
+    """Load KEY=VALUE lines from a .env file into os.environ (no dependency). Never overrides a variable that is already
+    set, never prints values. Looks in the current directory, then in the project root. Returns the names it set."""
+    import os
+
+    candidates = [path] if path else [Path.cwd() / ".env", Path(__file__).resolve().parents[2] / ".env"]
+    for f in candidates:
+        if f and f.is_file():
+            loaded = []
+            for raw in f.read_text().splitlines():
+                line = raw.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, val = line.partition("=")
+                key, val = key.strip().removeprefix("export ").strip(), val.strip()
+                if len(val) >= 2 and val[0] == val[-1] and val[0] in "'\"":
+                    val = val[1:-1]
+                if key and key not in os.environ and (prefix is None or key.startswith(prefix)):
+                    os.environ[key] = val
+                    loaded.append(key)
+            return loaded
+    return []
+
+
+def _make_llm(provider: str, model: str | None, judge: str | None = None, builder: str | None = None) -> LLM:
+    if provider != "api":
+        return ClaudeCLI(model, judge_model=judge, builder_model=builder)
+    import os
+
+    load_env_file()  # only the API provider reads the key from .env (the CLI provider must keep using your login)
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        raise ValueError("ANTHROPIC_API_KEY is not set: put it in .env (git-ignored) or export it, "
+                         "or use --provider cli")
+    return AnthropicLLM(model, judge_model=judge, builder_model=builder)
+
+
+def _resolve_provider(requested: str | None) -> str:
+    """--provider, else VERIFYFORGE_PROVIDER (shell or .env), else cli. Never falls back at run time."""
+    import os
+
+    load_env_file(prefix="VERIFYFORGE_")  # settings only: the API key is not loaded here
+    chosen = requested or os.environ.get("VERIFYFORGE_PROVIDER") or "cli"
+    if chosen not in ("cli", "api"):
+        raise ValueError(f"unknown provider {chosen!r}: use cli or api")
+    return chosen
+
+
+def _health(args) -> int:
+    """`verifyforge health`: one tiny round trip through the provider abstraction."""
+    try:
+        provider = _resolve_provider(args.provider)
+        llm = _make_llm(provider, args.model, args.judge_model, args.builder_model)
+        r = health_check(llm)
+    except ProviderError as e:
+        print(f"PROVIDER UNHEALTHY  {e}")  # the message already starts with the code
+        return 1
+    except ValueError as e:
+        print(f"ERROR       {e}", file=sys.stderr)
+        return 2
+    except Exception as e:  # e.g. the claude CLI missing or timing out
+        print(f"PROVIDER UNHEALTHY  {type(e).__name__}: {e}")
+        return 1
+    print(f"PROVIDER    {provider}\nMODEL       {r['model']}\nREPLY       {r['reply']}\nLATENCY     {r['seconds']}s\n"
+          f"TOKENS      in {r['input_tokens']} / out {r['output_tokens']}\nHEALTH      {'OK' if r['ok'] else 'UNEXPECTED REPLY'}")
+    return 0 if r["ok"] else 1
 
 
 class _NoRequest(Exception):
@@ -151,6 +214,90 @@ def _read_request() -> str:
     return "\n".join(lines).strip()
 
 
+def _scan_printer(name: str, d: dict) -> None:
+    """Plain-text subscriber for scan events (the Rich ScanUI consumes the same events)."""
+    if name == "SCAN_STARTED":
+        print(f"SCAN        {d['repo']}  (read-only)")
+    elif name == "REPO_MAPPED":
+        print("MAPPED      no Python source found" if d.get("unsupported") else f"MAPPED      {d['modules']} modules, {d['tests']} existing tests")
+    elif name == "EXISTING_TESTS_RESULT":
+        print(f"EXISTING    {d['status']}  ({d['passed']} passed / {d['failed']} failed / {d['collected']} collected)" + (f"  {d['reason'][:110]}" if d.get("reason") else ""))
+    elif name == "RANKING_DONE":
+        print("RANKING     " + ("AI + deterministic" if d.get("ai") else "AI ranking UNAVAILABLE (deterministic order only)") + ": "
+              + ", ".join(f"{r['path']} ({r['combined']})" for r in d["ranked"][:4]))
+    elif name == "RANKING_FAILED":
+        print(f"RANKING     provider error {d['code']}: deep verification will not run")
+    elif name == "CONTRACT_INFERRED":
+        print(f"CONTRACT    {d['module']}: {d['confidence']} ({d['eligible']} of {d['requirements']} requirements sufficiently evidenced)")
+    elif name == "HIDDEN_RETRY":
+        print(f"HIDDEN      {d['reason']}: regenerating once")
+    elif name == "MODULE_STARTED":
+        print(f"VERIFYING   module {d['index']} / {d['total']}: {d['module']}")
+    elif name == "HIDDEN_GENERATED":
+        print("HIDDEN      generated suite could not be collected" if d.get("collected") is False else
+              f"HIDDEN      {d['generated']} generated, {d['kept']} kept" + (" (bounded)" if d.get("truncated") else ""))
+    elif name == "HIDDEN_RESULT":
+        print(f"HIDDEN      {'PASS ✓' if d['passed'] else 'FAIL ✗'}  ({d['tests']} tests)" + (f"  {d['assertion']}" if d.get("assertion") else ""))
+    elif name == "TRIAGE_RESULT":
+        print(f"TRIAGE      {d['test'][:40]}: {d['verdict']} -> {d['status']}")
+    elif name == "MODULE_RESULT":
+        print(f"RESULT      {d['module']}: {d['status']}" + (f"  ({d['reason'][:120]})" if d.get("reason") else ""))
+    elif name == "SCAN_COMPLETE":
+        s = d["summary"]
+        print(f"\n{d['status']}\n  modules {s['python_modules']} | existing suite {s['existing_suite']} | deeply verified {s['deeply_verified']}: "
+              f"VERIFIED {s['verified']}, UNVERIFIED {s['unverified']}, INSUFFICIENT CONTRACT {s['insufficient_contract']}, "
+              f"NOT COMPLETED {s['not_completed']}, NOT DEEPLY VERIFIED {s['not_deeply_verified']}\n"
+              f"  repository unchanged: {'yes' if d['unchanged'] else 'NO'}" + (f" | highest-risk unresolved: {d['highest_risk']}" if d.get("highest_risk") else ""))
+
+
+def _scan(args) -> int:
+    """`verifyforge scan <path>`: read-only repository scan."""
+    from .scan import scan_repository
+
+    repo = Path(args.path).expanduser()
+    if not repo.exists():
+        print(f"ERROR       path does not exist: {args.path}", file=sys.stderr)
+        return 2
+    if not repo.is_dir():
+        print(f"ERROR       not a directory: {args.path}", file=sys.stderr)
+        return 2
+    try:
+        provider = _resolve_provider(args.provider)
+        llm = _make_llm(provider, args.model, args.judge_model, None)
+    except ValueError as e:
+        print(f"ERROR       {e}", file=sys.stderr)
+        return 2
+    judge, _ = resolve_models(args.model, args.judge_model, None)
+    out = args.out or Path("runs") / datetime.now().strftime("repo_scan_%Y-%m-%dT%H-%M-%S")
+    hook, ui = _scan_printer, None
+    if args.ui:
+        from .scan.ui import ScanUI
+
+        ui = ScanUI("LIVE · ANTHROPIC API" if provider == "api" else "LIVE · CLAUDE CLI", judge)
+        hook = ui
+    try:
+        if ui:
+            ui.__enter__()
+        report = scan_repository(repo, llm, out, max_modules=max(1, args.max_modules), max_adversarial=max(1, args.max_adversarial),
+                                 timeout=max(10, args.timeout), on_event=hook, provider=provider, models={"judge": judge})
+    except Exception as e:  # unexpected: a clean message, never a traceback
+        if ui:
+            ui.__exit__(None, None, None)
+        print(f"ERROR       scan failed: {type(e).__name__}: {str(e)[:200]}", file=sys.stderr)
+        return 1
+    except BaseException:
+        if ui:
+            ui.__exit__(None, None, None)
+        raise
+    if ui:
+        ui.__exit__(None, None, None)
+    print(f"Report: {out}/report.md")
+    s = report["summary"]
+    clean = (report["status"] == "REPOSITORY SCAN COMPLETE" and not s["unverified"] and not s["not_completed"]
+             and s["existing_suite"] not in ("FAIL", "TIMEOUT", "ERROR"))
+    return 0 if clean else 1
+
+
 def _default_out() -> Path:
     return Path("runs") / datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
 
@@ -172,12 +319,16 @@ def _main(argv: list[str] | None, state: dict) -> int:
         sp.add_argument("--out", type=Path, default=None, help="default: runs/<timestamp>")
         sp.add_argument("--max-repairs", type=int, default=3)
         sp.add_argument("--max-adversarial", type=int, default=15, help="hard cap on hidden adversarial tests")
-        sp.add_argument("--model", default=None)
+        sp.add_argument("--model", default=None, help="default model for every role (see also --judge-model/--builder-model)")
+        sp.add_argument("--judge-model", default=None, help="model for architect, auditors, verifier and triage "
+                        "(env VERIFYFORGE_JUDGE_MODEL)")
+        sp.add_argument("--builder-model", default=None, help="model for builder and repair (env VERIFYFORGE_BUILDER_MODEL)")
         sp.add_argument("--ui", action="store_true", help="Rich three-pane presentation (event subscriber only)")
         sp.add_argument("--pace", type=float, default=None,
                         help="UI hold-time multiplier so an audience can read; default 1.0 offline, 0 live")
-        sp.add_argument("--provider", choices=["cli", "api"], default="cli",
-                        help="cli: headless Claude Code login (default); api: ANTHROPIC_API_KEY")
+        sp.add_argument("--provider", choices=["cli", "api"], default=None,
+                        help="api: Anthropic API (ANTHROPIC_API_KEY); cli: headless Claude Code login. "
+                             "Default: VERIFYFORGE_PROVIDER, else cli. A run never switches provider mid-way.")
 
     r = sub.add_parser("run", help="Run on a spec .md file or a natural-language request (omit for a prompt)")
     r.add_argument("target", nargs="?")
@@ -186,9 +337,32 @@ def _main(argv: list[str] | None, state: dict) -> int:
     d.add_argument("name", choices=["rate-limiter"])
     d.add_argument("--offline", action="store_true", help="replay saved model outputs; pytest still runs for real")
     common(d)
+    sc = sub.add_parser("scan", help="Read-only scan of an existing Python repository: map, run its tests, independently challenge risky modules")
+    sc.add_argument("path", help="repository root (e.g. .)")
+    sc.add_argument("--ui", action="store_true", help="Rich repository-scan UI")
+    sc.add_argument("--provider", choices=["cli", "api"], default=None)
+    sc.add_argument("--model", default=None)
+    sc.add_argument("--judge-model", default=None)
+    sc.add_argument("--max-modules", type=int, default=3, help="modules to verify deeply (default 3)")
+    sc.add_argument("--max-adversarial", type=int, default=15, help="hidden tests per module (cap)")
+    sc.add_argument("--timeout", type=int, default=300, help="seconds allowed for the repository's own test suite")
+    sc.add_argument("--out", type=Path, default=None)
+    h = sub.add_parser("health", help="Check the model provider with one tiny round trip")
+    for flag in ("--provider", "--model", "--judge-model", "--builder-model"):
+        h.add_argument(flag, default=None)
     args = p.parse_args(argv)
+    if args.cmd == "health":
+        return _health(args)
+    if args.cmd == "scan":
+        return _scan(args)
     out = args.out or _default_out()
     offline = args.cmd == "demo" and args.offline
+    if not offline:
+        try:
+            args.provider = _resolve_provider(args.provider)
+        except ValueError as e:
+            print(f"ERROR       {e}", file=sys.stderr)
+            return 2
 
     # Resolve the user's request BEFORE building the UI or touching any model, so the Architect can never be
     # started with an empty goal and the prompt is visible on a normal terminal.
@@ -214,8 +388,14 @@ def _main(argv: list[str] | None, state: dict) -> int:
             from .demos import RATE_LIMITER_REQUEST as goal
         elif target:
             goal = target
-        ui = VerifyForgeUI(mode, goal=goal, max_repairs=args.max_repairs, pace=pace,
-                           subtitle="REPLAYED MODEL OUTPUT · REAL PYTEST" if offline else "LIVE MODEL OUTPUT · REAL PYTEST")
+        if offline:
+            subtitle = "REPLAYED MODEL OUTPUT · REAL PYTEST"
+        elif args.provider == "api":
+            j, b = resolve_models(args.model, args.judge_model, args.builder_model)
+            subtitle = f"JUDGE {j} · BUILDER {b}" if j != b else f"MODEL {j}"
+        else:
+            subtitle = "LIVE MODEL OUTPUT · REAL PYTEST"
+        ui = VerifyForgeUI(mode, goal=goal, max_repairs=args.max_repairs, pace=pace, subtitle=subtitle)
         hook = ui
 
     try:
@@ -224,10 +404,10 @@ def _main(argv: list[str] | None, state: dict) -> int:
         if args.cmd == "demo":
             from .demos import RATE_LIMITER_REQUEST, rate_limiter_replay
 
-            llm = rate_limiter_replay() if args.offline else _make_llm(args.provider, args.model)
+            llm = rate_limiter_replay() if args.offline else _make_llm(args.provider, args.model, args.judge_model, args.builder_model)
             report = run_request(llm, RATE_LIMITER_REQUEST, out, max_repairs=args.max_repairs, max_adversarial=args.max_adversarial, on_event=hook)
         else:
-            llm = _make_llm(args.provider, args.model)
+            llm = _make_llm(args.provider, args.model, args.judge_model, args.builder_model)
             path = Path(target)
             if "\n" not in target and path.suffix == ".md" and path.exists():
                 report = run(llm, path.read_text(), out, args.max_repairs, on_event=hook, max_adversarial=args.max_adversarial)

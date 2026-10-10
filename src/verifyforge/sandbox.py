@@ -139,7 +139,8 @@ def _judge(result_path: Path, nonce: str, exit_code: int, files: dict[str, str],
     return True, "", ran, skipped, len(collected)
 
 
-def run_pytest(files: dict[str, str], timeout: int = 60, deselect: list[str] | None = None) -> TestResult:
+def run_pytest(files: dict[str, str], timeout: int = 60, deselect: list[str] | None = None,
+               extra_paths: list[str] | None = None) -> TestResult:
     """Write files to a temp dir and run pytest there. Not a hardened sandbox: it only raises the bar against a
     result being faked by accident or by simple tampering (exit codes, atexit, conftest, collection patching)."""
     deselect = list(deselect or [])
@@ -150,6 +151,9 @@ def run_pytest(files: dict[str, str], timeout: int = 60, deselect: list[str] | N
         nonce = os.urandom(12).hex()
         result_path = Path(rd) / "result.json"
         env = {**_clean_env(), "VF_DESELECT": json.dumps(deselect), "VF_NONCE": nonce, "VF_RESULT": str(result_path)}
+        if extra_paths:  # e.g. a staged repository copy whose real modules the tests import
+            env["PYTHONPATH"] = os.pathsep.join(extra_paths)
+            env["PYTHONDONTWRITEBYTECODE"] = "1"
         start = time.monotonic()
         try:
             p = subprocess.run(
@@ -183,14 +187,18 @@ def failure_lines(stdout: str, node_id: str) -> str:
     return "\n".join(out[:12])
 
 
-def collect_tests(files: dict[str, str], timeout: int = 60) -> list[str] | None:
+def collect_tests(files: dict[str, str], timeout: int = 60, extra_paths: list[str] | None = None) -> list[str] | None:
     """Node ids pytest would run (parametrized cases counted individually), or None if collection fails."""
     with tempfile.TemporaryDirectory(prefix="verifyforge_") as d:
         for name, content in files.items():
             (Path(d) / name).write_text(content)
         try:
+            env = _clean_env()
+            if extra_paths:
+                env["PYTHONPATH"] = os.pathsep.join(extra_paths)
+                env["PYTHONDONTWRITEBYTECODE"] = "1"
             p = subprocess.run([sys.executable, "-m", "pytest", "--collect-only", "-q", "-p", "no:cacheprovider"],
-                               cwd=d, capture_output=True, text=True, timeout=timeout, env=_clean_env())
+                               cwd=d, capture_output=True, text=True, timeout=timeout, env=env)
         except subprocess.TimeoutExpired:
             return None
         if p.returncode != 0:

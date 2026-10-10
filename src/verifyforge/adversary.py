@@ -37,7 +37,7 @@ def _round_robin(ids: list[str], cap: int) -> list[str]:
 
 
 def bounded_adversarial(llm: LLM, spec: Spec, base_files: dict[str, str], cap: int = MAX_ADVERSARIAL_TESTS,
-                        timeout: int = 60) -> tuple[str, list[str], dict]:
+                        timeout: int = 60, extra_paths: list[str] | None = None) -> tuple[str, list[str], dict]:
     """Generate the hidden suite and enforce the size cap in code, not just in the prompt.
 
     Over the cap: regenerate once with the count fed back; if still over, keep a bounded round-robin subset by
@@ -45,13 +45,13 @@ def bounded_adversarial(llm: LLM, spec: Spec, base_files: dict[str, str], cap: i
     from .sandbox import collect_tests
 
     code = adversarial_tests(llm, spec, cap)
-    ids = collect_tests({**base_files, "test_adversarial.py": code}, timeout)
+    ids = collect_tests({**base_files, "test_adversarial.py": code}, timeout, extra_paths)
     info = {"cap": cap, "generated": None if ids is None else len(ids), "regenerated": False, "truncated": False,
             "kept": None if ids is None else min(len(ids), cap)}
     if ids is None or len(ids) <= cap:
         return code, [], info
     code2 = adversarial_tests(llm, spec, cap, previous_count=len(ids))
-    ids2 = collect_tests({**base_files, "test_adversarial.py": code2}, timeout)
+    ids2 = collect_tests({**base_files, "test_adversarial.py": code2}, timeout, extra_paths)
     info["regenerated"], info["first_attempt"] = True, len(ids)
     if ids2 is not None:
         code, ids = code2, ids2
