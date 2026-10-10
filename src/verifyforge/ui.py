@@ -74,7 +74,7 @@ class VerifyForgeUI:
                  console: Console | None = None, subtitle: str = ""):
         self.console = console or Console()
         self.mode, self.subtitle, self.goal = mode, subtitle, goal
-        self.max_repairs, self.pace = max_repairs, pace
+        self.max_repairs, self.pace = max_repairs, max(0.0, float(pace or 0.0))  # a negative pace must never reach time.sleep
         self._lock = threading.RLock()
         self._live: Live | None = None
         self.started = time.monotonic()
@@ -102,6 +102,7 @@ class VerifyForgeUI:
         self.spec_rejected = False
         self.reason = ""
         self.triage_suite = "adversarial"
+        self.cap: dict = {}
 
     # ----- lifecycle -------------------------------------------------------------------------------------
     def __enter__(self) -> "VerifyForgeUI":
@@ -165,6 +166,8 @@ class VerifyForgeUI:
                         "failed": _fails(d["text"]), "names": _failing_tests(d["text"]),
                         "assertions": _assertion_lines(d["text"])}
             self.state = "ADVERSARIAL FAILED" if not d["passed"] else self.state
+        elif name == "ADVERSARIAL_CAPPED":
+            self.cap = dict(d)
         elif name == "TRIAGE_STARTED":
             self.state, self.triaging = "TRIAGING TEST", d["test"].split("::")[-1]
             self.triage_suite = d.get("suite", "adversarial")
@@ -376,6 +379,8 @@ class VerifyForgeUI:
             row("TIER-1", "PASS" if tier1_ok else "FAIL", tier1_ok)
             row("ADVERSARIAL", "PASS" if adv_ok else "FAIL", adv_ok)
             row("REGRESSION", self.regression or "NOT NEEDED", None if self.regression != "FAIL" else False)
+            if self.cap.get("truncated"):
+                row("HIDDEN SUITE", f"{self.cap['kept']} of {self.cap['generated']} tests (bounded)")
             row("REPAIRS", str(self.repairs_used))
             row("TRIAGE", str(len(self.triage)))
         row("EXECUTION", "REAL PYTEST")

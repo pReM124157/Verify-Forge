@@ -53,6 +53,8 @@ def _plain_printer(name: str, d: dict) -> None:
     elif name == "UNVERIFIED":
         why = f"  reason: {d['reason']}" if d.get("reason") else ""
         print(f"\nUNVERIFIED ✗  ({d['repairs']} repair(s) used){why}")
+        if d.get("error"):
+            print(f"            {str(d['error'])[:200]}")
     elif name == "ERROR":
         print(f"ERROR       {d['error']}", file=sys.stderr)
 
@@ -117,7 +119,8 @@ def _read_request() -> str:
     Ctrl+C (130) or on EOF with nothing entered (1). Unread terminal input is flushed on every path."""
     tty = _stdin_is_tty()
     print("VERIFYFORGE\nAI PROPOSES · EXECUTION VERIFIES\n\n"
-          "Describe what you want me to build.\nPaste one or multiple lines.\nSubmit with an empty line.\n")
+          "Describe what you want me to build.\nPaste one or multiple lines.\nSubmit with an empty line.\n"
+          "(A single line must be under 1,000 characters: your terminal drops the rest. Break long text into lines.)\n")
     lines: list[str] = []
     try:
         while True:

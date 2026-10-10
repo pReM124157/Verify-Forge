@@ -20,6 +20,12 @@ MAX_QUARANTINES = 3
 EventHook = Callable[[str, dict], None]
 
 
+def _out(t) -> str:
+    """pytest output, plus the runner's integrity verdict when an exit code of 0 was NOT accepted as a pass."""
+    extra = f"\n[verifyforge integrity] {t.integrity_error}" if t.integrity_error and not t.timed_out else ""
+    return t.output + extra
+
+
 def _diff(old: str, new: str) -> str:
     return "".join(difflib.unified_diff(old.splitlines(True), new.splitlines(True), "before", "after"))
 
@@ -32,14 +38,20 @@ def run(llm: LLM, spec_text: str, out: Path, max_repairs: int = 3, timeout: int 
     Neither the Tier-1 tests nor the adversarial tests are ever shown the implementation."""
     events: list[dict] = []
 
+    hook_errors: list[str] = list((preflight or {}).get("subscriber_errors", []))
+
     def emit(name: str, **data) -> None:
         events.append({"event": name, **{k: v for k, v in data.items() if k != "text"}})
         if on_event:
-            on_event(name, data)
+            try:
+                on_event(name, data)
+            except Exception as e:  # a subscriber (UI, logger...) must never be able to change or abort a verification
+                hook_errors.append(f"{name}: {type(e).__name__}: {e}")
 
     spec = parse_spec(spec_text)
     out.mkdir(parents=True, exist_ok=True)
-    report = Report(spec.title, spec.module, [r.__dict__ for r in spec.requirements], request=request)
+    report = Report(spec.title, spec.module, [r.__dict__ for r in spec.requirements], request=request,
+                    model=str(getattr(llm, "model", "") or ""))
     if preflight:  # results of the requirement-preservation gate, which ran before this point
         report.traceability, report.preservation = preflight["traceability"], preflight["preservation"]
         events[:0] = preflight["events"]
@@ -101,7 +113,7 @@ def run(llm: LLM, spec_text: str, out: Path, max_repairs: int = 3, timeout: int 
             emit("TIER1_RUNNING", round=n)
             t = run_pytest({**files, "test_tier1.py": tier1}, timeout, deselect=t1_quarantined)
             emit("TIER1_RESULT", round=n, passed=t.passed, tests=t.tests_run, exit_code=t.exit_code,
-                 seconds=t.duration, text=t.output)
+                 seconds=t.duration, timed_out=t.timed_out, skipped=t.skipped, integrity=t.integrity_error, text=_out(t))
             a = None
             if t.passed:
                 if not adv:
@@ -114,12 +126,12 @@ def run(llm: LLM, spec_text: str, out: Path, max_repairs: int = 3, timeout: int 
                 emit("ADVERSARIAL_RUNNING", round=n)
                 a = run_pytest({**files, "test_adversarial.py": adv}, timeout, deselect=quarantined + capped_out)
                 emit("ADVERSARIAL_RESULT", round=n, passed=a.passed, tests=a.tests_run, exit_code=a.exit_code,
-                     seconds=a.duration, text=a.output)
+                     seconds=a.duration, timed_out=a.timed_out, skipped=a.skipped, integrity=a.integrity_error, text=_out(a))
 
             prev = report.rounds[-1] if report.rounds else None
             regression = bool(prev and ((prev.tier1_passed and not t.passed)
                                         or (prev.adversarial_passed is True and a is not None and not a.passed)))
-            outputs = [t.output] + ([a.output] if a else [])
+            outputs = [_out(t)] + ([_out(a)] if a else [])
             report.rounds.append(Round(
                 n, t.passed, None if a is None else a.passed, "\n".join(outputs).strip(),
                 pending_diff, regression,
@@ -151,7 +163,7 @@ def run(llm: LLM, spec_text: str, out: Path, max_repairs: int = 3, timeout: int 
                 emit("UNVERIFIED", repairs=report.repairs)
                 break
 
-            failure = ("TIER-1:\n" + t.output) if not t.passed else ("ADVERSARIAL:\n" + a.output)
+            failure = ("TIER-1:\n" + _out(t)) if not t.passed else ("ADVERSARIAL:\n" + _out(a))
             emit("REPAIR_STARTED", repair=report.repairs + 1, of=max_repairs)
             new = repair_impl(llm, spec, impl, failure)
             patches.append(_diff(impl, new))
@@ -165,6 +177,7 @@ def run(llm: LLM, spec_text: str, out: Path, max_repairs: int = 3, timeout: int 
         report.error = f"{type(e).__name__}: {e}"
         emit("ERROR", error=report.error)
 
+    report.subscriber_errors = hook_errors
     _write_artifacts(out, spec_text, spec.module, tier1 or "", adv, versions, patches, events, report)
     return report
 
@@ -192,6 +205,21 @@ def _feedback(missing: list[str]) -> str:
             + "\nRegenerate the full JSON. Keep every explicit user requirement exactly as the user wrote it.")
 
 
+def _architect_unavailable(llm, request, out, err, emit, events, specs, rejected, hook_errors) -> Report:
+    """The Architect could not be reached: record an honest UNVERIFIED run (directory, events, report) instead of crashing."""
+    reason = f"{type(err).__name__}: {err}"
+    report = Report("(no specification: the Architect was unavailable)", "", [], request=request, error=reason,
+                    unverified_reason="ARCHITECT_UNAVAILABLE", preservation={"attempts": len(specs), "rejected": rejected, "passed": False},
+                    subscriber_errors=hook_errors, model=str(getattr(llm, "model", "") or ""))
+    emit("UNVERIFIED", repairs=0, reason="ARCHITECT_UNAVAILABLE", error=reason)
+    out.mkdir(parents=True, exist_ok=True)
+    for i, text in enumerate(specs, 1):
+        (out / f"specification_rejected_{i}.md").write_text(text)
+    (out / "events.jsonl").write_text("".join(json.dumps(e) + "\n" for e in events))
+    report.write(out)
+    return report
+
+
 def run_request(llm: LLM, request: str, out: Path, **kw) -> Report:
     """Natural-language entry point: the Architect writes the spec AND Tier-1 tests before any code exists.
 
@@ -203,16 +231,26 @@ def run_request(llm: LLM, request: str, out: Path, **kw) -> Report:
     on_event = kw.get("on_event")
     events: list[dict] = []
 
+    hook_errors: list[str] = []
+
     def emit(name: str, **data) -> None:
         events.append({"event": name, **{k: v for k, v in data.items() if k != "text"}})
         if on_event:
-            on_event(name, data)
+            try:
+                on_event(name, data)
+            except Exception as e:  # a subscriber must never be able to crash or alter the run
+                hook_errors.append(f"{name}: {type(e).__name__}: {e}")
 
     rejected: list[dict] = []
     specs: list[str] = []
     feedback = ""
     for attempt in (1, 2):
-        arch = architect_full(llm, request, feedback)
+        try:
+            arch = architect_full(llm, request, feedback)
+        except ValueError:
+            raise  # malformed Architect output: nothing was built, the caller reports the message
+        except Exception as e:  # provider/transport failure (usage limit, timeout, missing CLI, oversized argument ...)
+            return _architect_unavailable(llm, request, out, e, emit, events, specs, rejected, hook_errors)
         specs.append(arch.spec_md)
         emit("PRESERVATION_CHECK_STARTED", attempt=attempt)
         pres = check_preservation(llm, request, arch.spec_md, arch.traceability)
@@ -238,14 +276,16 @@ def run_request(llm: LLM, request: str, out: Path, **kw) -> Report:
             out.mkdir(parents=True, exist_ok=True)
             (out / f"specification_rejected_{i}.md").write_text(specs[i - 1])
         return run(llm, arch.spec_md, out, request=request, tier1=arch.tier1,
-                   preflight={"events": events, "traceability": pres.items, "preservation": info}, **kw)
+                   preflight={"events": events, "traceability": pres.items, "preservation": info,
+                              "subscriber_errors": hook_errors}, **kw)
 
     # Rejected: no Builder, no tests executed, no code. Record the evidence and end UNVERIFIED.
     spec = parse_spec(specs[-1])
     reason = REASON_NOT_PRESERVED if pres.audit_ok else REASON_AUDIT_UNAVAILABLE
     report = Report(spec.title, spec.module, [r.__dict__ for r in spec.requirements], request=request,
                     traceability=pres.items, preservation=info, unverified_reason=reason,
-                    error=pres.audit_error if not pres.audit_ok else "")
+                    error=pres.audit_error if not pres.audit_ok else "", subscriber_errors=hook_errors,
+                    model=str(getattr(llm, "model", "") or ""))
     emit("UNVERIFIED", repairs=0, reason=reason, preserved=pres.preserved, total=pres.total)
     out.mkdir(parents=True, exist_ok=True)
     for i, text in enumerate(specs, 1):

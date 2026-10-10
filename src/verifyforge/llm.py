@@ -63,11 +63,16 @@ class ClaudeCLI:
                 p = subprocess.run(cmd, capture_output=True, text=True, timeout=self.timeout, cwd=cwd)
             except FileNotFoundError as e:
                 raise RuntimeError("`claude` CLI not found; install Claude Code or use --provider api") from e
+            except OSError as e:  # e.g. E2BIG: the request is too large to pass on the command line
+                raise RuntimeError(f"could not start the claude CLI ({type(e).__name__}: {e}); the request may be too large") from e
             except subprocess.TimeoutExpired as e:
                 raise TimeoutError(f"claude CLI timed out after {self.timeout}s") from e
         try:
-            payload = json.loads(p.stdout)
-        except json.JSONDecodeError as e:
+            try:
+                payload = json.loads(p.stdout)
+            except json.JSONDecodeError:  # tolerate warning lines printed before the JSON document
+                payload = json.loads(next(l for l in reversed(p.stdout.strip().splitlines()) if l.lstrip().startswith("{")))
+        except (json.JSONDecodeError, StopIteration) as e:
             raise RuntimeError(f"claude CLI returned non-JSON (exit {p.returncode}): {(p.stdout or p.stderr)[:300]}") from e
         if p.returncode != 0 or payload.get("is_error"):
             raise RuntimeError(f"claude CLI error (exit {p.returncode}): {str(payload.get('result', p.stderr))[:300]}")

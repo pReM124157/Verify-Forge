@@ -187,6 +187,47 @@ def _parse_audit(raw: str) -> list[dict]:
     return items
 
 
+_STOP = {"that", "this", "with", "must", "never", "when", "where", "which", "their", "there", "should", "would", "could",
+         "each", "only", "than", "them", "then", "have", "from", "into", "does", "same", "also", "used", "uses", "using",
+         "make", "keep", "more", "most", "some", "such"}
+
+
+def _words(text: str) -> set[str]:
+    words = {w for w in re.findall(r"[a-z_][a-z0-9_]{3,}", text.lower()) if w not in _STOP}
+    return {w[:-1] if len(w) > 4 and w.endswith("s") and not w.endswith("ss") else w for w in words}  # threads ~ thread
+
+
+def _coverage_gaps(request: str, items: list[dict]) -> list[dict]:
+    """Every bullet/numbered requirement line of the request must be touched by at least one audit item (shares a
+    content word). A lone vague item can no longer stand in for a whole list of requirements."""
+    covered = [_words(i["user_requirement"] + " " + i.get("evidence", "")) for i in items]
+    gaps = []
+    for line in request.splitlines():
+        m = re.match(r"^\s*(?:[-*•]|\d+[.)])\s+(.*\S)", line)
+        if m and not any(_words(m.group(1)) & c for c in covered):
+            gaps.append({"user_requirement": m.group(1).strip(), "mapped": [], "status": "MISSING", "source": "coverage check",
+                         "evidence": "no audit item covers this requirement line of the request"})
+    return gaps
+
+
+def _validate_ids(items: list[dict], spec_text: str) -> list[dict]:
+    """Requirement ids cited by the auditor must exist in the spec. A PRESERVED claim that cites only ids that do not
+    exist is not accepted."""
+    valid = {f"R{i}" for i, _ in enumerate(parse_spec(spec_text).requirements, 1)}
+    out = []
+    for it in items:
+        it = dict(it)
+        cited = [m for m in it["mapped"] if re.fullmatch(r"R\d+", m)]
+        bogus = [m for m in cited if m not in valid]
+        if bogus:
+            it["mapped"] = [m for m in it["mapped"] if m not in bogus]
+            if it["status"] == PRESERVED and not it["mapped"]:
+                it["status"] = "MISSING"
+                it["evidence"] = f"cites requirement ids that do not exist in the specification: {', '.join(bogus)}"
+        out.append(it)
+    return out
+
+
 def _merge(items: list[dict], structural: list[dict]) -> list[dict]:
     """Fold structural failures into the auditor's list: a finding downgrades the auditor item it concerns (so one
     defect is never counted twice); a finding concerning something the auditor never listed is added as an item."""
@@ -226,5 +267,6 @@ def check_preservation(llm: LLM, request: str, spec_text: str, claims: list[dict
             err = f"{type(e).__name__}: {e}"
     if err:
         return Preservation(False, structural, audit_ok=False, audit_error=err)
-    items = _merge(items, structural)
+    items = _validate_ids(items, spec_text)
+    items = _merge(items, structural) + _coverage_gaps(request, items)
     return Preservation(all(i["status"] == PRESERVED for i in items), items)

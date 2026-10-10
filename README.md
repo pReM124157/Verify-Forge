@@ -10,7 +10,7 @@ request -> ARCHITECT (spec + Tier-1 tests) -> BUILDER -> Tier-1 run
         -> fail? -> REPAIR (max 3) -> rerun Tier-1 + adversarial -> VERIFIED / UNVERIFIED
 ```
 
-`VERIFIED` is computed only from real pytest exit codes. API failures are recorded as `UNVERIFIED`.
+`VERIFIED` is computed only from pytest's own record of the tests that ran (not a model's opinion). Provider and API failures are recorded as `UNVERIFIED`.
 
 ## Usage
 ```bash
@@ -38,5 +38,16 @@ macOS note: the venv's editable-install `.pth` can get marked hidden, which Pyth
 the run produces identical results without it. The header always states `MODE: OFFLINE DEMO` (replayed model output) or
 `MODE: LIVE · CLAUDE CLI`. `--pace` scales how long the UI lingers on each event (default 1.0 offline, 0 live).
 
+## What VERIFIED means (and does not)
+`VERIFIED` means: the specification kept every explicit requirement of your request (independent audit plus structural
+checks), and the generated Tier-1 tests and a bounded hidden adversarial suite all really executed and passed under
+pytest, with none skipped. It is **not** a formal proof. Concurrency is stress-tested, which cannot prove the absence of
+races; tests and judges are LLM-generated and can be wrong (wrong tests are triaged, wrong verdicts remain a residual
+risk); the hidden suite is capped (the report states generated vs kept).
+
 ## Safety note
-Generated code runs in a subprocess with a timeout inside a temp dir. This is **not** a hardened sandbox; run in a container for untrusted specs.
+Generated code runs in a subprocess with a timeout inside a temp dir. This is **not** a hardened sandbox: the code can
+read files, write outside the temp dir and use the network (credential-looking environment variables are scrubbed, but
+nothing else is isolated). The runner checks pytest's own record of what ran instead of trusting its exit code, which
+defeats accidental or crude tampering (early exit, `atexit`, skipped or deselected tests) but not a determined attacker
+who patches pytest in-process. Run VerifyForge in a container for untrusted requests.

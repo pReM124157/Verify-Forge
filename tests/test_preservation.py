@@ -170,7 +170,8 @@ GOOD_JSON = architect_json()
 
 def audit_reply(status="PRESERVED", mapped=("SPEC",), items=None):
     items = items or ["get(key)", "put(key, value, ttl_seconds)", "capacity 100", "LRU eviction",
-                      "expired entries never returned", "thread safety"]
+                      "expired entries never returned", "thread safety: multiple threads call get and put, internal state never corrupted under concurrency",
+                      "public API small, no unnecessary features"]
     return json.dumps({"requirements": [{"user_requirement": u, "mapped": list(mapped), "status": status,
                                          "evidence": "stated in the spec"} for u in items]})
 
@@ -263,7 +264,7 @@ def test_each_defect_fails_preservation(name):
 
 def test_all_requirements_correctly_represented_passes_and_maps_every_requirement():
     p = check_preservation(Scripted([]), USER_TTL, spec_of(GOOD_JSON))
-    assert p.passed and p.preserved == p.total == 6 and p.missing == []
+    assert p.passed and p.preserved == p.total == 7 and p.missing == []
     assert deterministic_checks(USER_TTL, spec_of(GOOD_JSON)) == []
 
 
@@ -306,7 +307,12 @@ def smart_auditor(prompt):
             {"user_requirement": "put(key, value, ttl_seconds)", "mapped": [], "status": "CHANGED",
              "evidence": "spec has set(key, value) with a constructor ttl"},
             {"user_requirement": "capacity 100", "mapped": [], "status": "MISSING", "evidence": "no capacity"},
-            {"user_requirement": "LRU eviction", "mapped": [], "status": "MISSING", "evidence": "no eviction"}]})
+            {"user_requirement": "LRU eviction", "mapped": [], "status": "MISSING", "evidence": "no eviction"},
+            {"user_requirement": "expired entries never returned", "mapped": ["R3"], "status": "PRESERVED", "evidence": "R3"},
+            {"user_requirement": "multiple threads call get and put; internal state never corrupted under concurrency",
+             "mapped": ["R4"], "status": "PRESERVED", "evidence": "R4"},
+            {"user_requirement": "public API small, no unnecessary features", "mapped": ["SPEC"], "status": "PRESERVED",
+             "evidence": "spec"}]})
     return audit_reply()
 
 
@@ -323,7 +329,7 @@ def test_regeneration_repairs_a_rejected_specification_and_the_run_verifies(tmp_
     assert (tmp_path / "specification_rejected_1.md").exists() and (tmp_path / "specification.md").exists()
     assert all(t["status"] == "PRESERVED" for t in r.traceability)
     rejected_evt = next(d for n, d in events if n == "SPEC_REJECTED")
-    assert rejected_evt["preserved"] == 1 and rejected_evt["total"] == 4
+    assert rejected_evt["preserved"] == 4 and rejected_evt["total"] == 7
 
 
 def test_original_user_request_is_never_modified(tmp_path: Path):
@@ -340,9 +346,9 @@ def test_good_spec_run_verifies_with_full_traceability_table(tmp_path: Path):
     llm = Scripted([GOOD_JSON])
     r = run_request(llm, USER_TTL, tmp_path)
     assert r.status == "VERIFIED" and r.preservation["attempts"] == 1 and r.preservation["rejected"] == []
-    assert len(r.traceability) == 6 and all(t["status"] == "PRESERVED" for t in r.traceability)
+    assert len(r.traceability) == 7 and all(t["status"] == "PRESERVED" for t in r.traceability)
     md = (tmp_path / "verification_report.md").read_text()
-    assert "## User requirement traceability" in md and "6 / 6 user requirements preserved" in md
+    assert "## User requirement traceability" in md and "7 / 7 user requirements preserved" in md
     assert "| put(key, value, ttl_seconds) | SPEC | PRESERVED |" in md and "| capacity 100 |" in md
     assert SYS_BUILDER in llm.roles
 
@@ -389,8 +395,8 @@ def test_ui_shows_rejection_then_preserved_count_and_never_started_builder(tmp_p
 
     run_request(Scripted([BAD_JSON, GOOD_JSON], auditor=smart_auditor), USER_TTL, tmp_path, on_event=hook)
     rejected, passed = seen[0][1], seen[1][1]
-    assert "SPEC REJECTED" in rejected and "1 / 4 user requirements preserved" in rejected
-    assert "6 / 6 user requirements preserved" in passed
+    assert "SPEC REJECTED" in rejected and "4 / 7 user requirements preserved" in rejected
+    assert "7 / 7 user requirements preserved" in passed
 
     ui2 = VerifyForgeUI("LIVE · CLAUDE CLI", USER_TTL, 3, 0, Console(file=io.StringIO(), width=132), "x")
     run_request(Scripted([BAD_JSON]), USER_TTL, tmp_path / "rej", on_event=ui2)
@@ -410,4 +416,4 @@ def test_a_title_alone_cannot_satisfy_the_concurrency_requirement():
 
 def test_one_defect_is_counted_once_not_twice():
     lazy = check_preservation(Scripted([]), USER_TTL, spec_of(architect_json(omit=("lru",))))
-    assert lazy.total == 6 and lazy.preserved == 5  # the auditor's LRU item was downgraded, not duplicated
+    assert lazy.total == 7 and lazy.preserved == 6  # the auditor's LRU item was downgraded, not duplicated

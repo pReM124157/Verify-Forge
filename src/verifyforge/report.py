@@ -31,6 +31,8 @@ class Report:
     traceability: list[dict] = field(default_factory=list)  # auditor-verified user requirement -> spec mapping
     preservation: dict = field(default_factory=dict)  # attempts / rejections of the requirement-preservation gate
     unverified_reason: str = ""
+    subscriber_errors: list[str] = field(default_factory=list)  # event-subscriber exceptions (isolated, never abort a run)
+    model: str = ""
 
     @property
     def quarantined(self) -> int:
@@ -44,7 +46,10 @@ class Report:
         # VERIFIED is forbidden unless every explicit user requirement was PRESERVED in the specification.
         if any(t["status"] != "PRESERVED" for t in self.traceability):
             return "UNVERIFIED"
-        return "VERIFIED" if r and r.tier1_passed and r.adversarial_passed else "UNVERIFIED"
+        if self.preservation and self.preservation.get("passed") is False:
+            return "UNVERIFIED"
+        # tests_run > 0: both flags True with nothing executed is never evidence
+        return "VERIFIED" if r and r.tier1_passed and r.adversarial_passed and r.tests_run > 0 else "UNVERIFIED"
 
     def write(self, out: Path) -> None:
         data = asdict(self) | {"status": self.status, "quarantined": self.quarantined}
@@ -53,7 +58,12 @@ class Report:
         def cell(v):
             return "not run" if v is None else ("pass" if v else "FAIL")
 
-        lines = [f"# Verification report: {self.title}", "", f"**Status: {self.status}**", f"Repairs: {self.repairs}", f"Quarantined adversarial tests: {self.quarantined}", "",
+        c0 = self.adversarial_cap
+        scope = ([f"Scope: the hidden adversarial suite was bounded: {c0['kept']} of {c0['generated']} generated tests ran "
+                  f"(cap {c0['cap']}). {self.status} refers to the active bounded suite.", ""]
+                 if c0 and c0.get("truncated") else [])
+        lines = [f"# Verification report: {self.title}", "", f"**Status: {self.status}**", *scope, f"Repairs: {self.repairs}", f"Quarantined tests: {self.quarantined}",
+                 *([f"Model: {self.model}"] if self.model else []), "",
                  *(["## User request", "```text", self.request, "```", ""] if self.request else []),
                  "## Requirements", *[f"- {r['id']}: {r['text']}" for r in self.requirements], "",
                  "## Rounds", "| Round | Tier-1 | Adversarial | Tests | Seconds |", "|---|---|---|---|---|"]
@@ -89,6 +99,8 @@ class Report:
                           "Observed failure:", "```", t["failure"], "```"]
                 if t["status"] == "QUARANTINED":
                     lines.append(f"Replacement test generated: {'YES' if t['replacement'] else 'NO'}")
+        if self.subscriber_errors:
+            lines += ["", "## Event subscriber errors (isolated; the verification was not affected)"] + [f"- {e}" for e in self.subscriber_errors]
         if self.error:
             lines += ["", "## Error", self.error]
         for r in self.rounds:
